@@ -12,12 +12,44 @@ async def fetch_workspaces(
 ) -> list[dict]:
     """
     Logs into Reply.io and scrapes all available workspaces.
+    Intercepts the /api/v2/users/teams API call that Reply.io makes internally.
     Returns: [{"team_id": 123, "name": "Workspace Name"}, ...]
     """
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
+
+        # Intercept API calls to capture team/workspace data
+        captured_teams = []
+
+        async def handle_response(response):
+            url = response.url.lower()
+            if "/team" in url or "/workspace" in url or "/account" in url:
+                try:
+                    body = await response.json()
+                    print(f"[fetch_workspaces] Intercepted {response.url}: {str(body)[:200]}")
+                    if isinstance(body, list):
+                        for item in body:
+                            if isinstance(item, dict) and ("id" in item or "teamId" in item):
+                                tid = item.get("id") or item.get("teamId")
+                                name = item.get("name") or item.get("teamName") or item.get("title") or ""
+                                if tid:
+                                    captured_teams.append({"team_id": int(tid), "name": name})
+                    elif isinstance(body, dict):
+                        # Could be nested: body.teams, body.data, etc.
+                        for key in ("teams", "data", "items", "results"):
+                            if key in body and isinstance(body[key], list):
+                                for item in body[key]:
+                                    if isinstance(item, dict):
+                                        tid = item.get("id") or item.get("teamId")
+                                        name = item.get("name") or item.get("teamName") or item.get("title") or ""
+                                        if tid:
+                                            captured_teams.append({"team_id": int(tid), "name": name})
+                except Exception:
+                    pass
+
+        page.on("response", handle_response)
 
         # LOGIN
         await page.goto("https://run.reply.io/", wait_until="domcontentloaded", timeout=30_000)
@@ -31,19 +63,52 @@ async def fetch_workspaces(
                 await page.wait_for_url("**/run.reply.io/**", timeout=20_000)
             except Exception:
                 pass
+        await asyncio.sleep(5)
+
+        # If intercepted teams from login/dashboard load, use those
+        if captured_teams:
+            print(f"[fetch_workspaces] Capturados {len(captured_teams)} teams de API interceptada")
+            await browser.close()
+            return captured_teams
+
+        # Strategy 2: Try to find and click the workspace/account switcher in the UI
+        print("[fetch_workspaces] No se interceptaron teams, buscando switcher en UI...")
+
+        # Look for common workspace switcher patterns
+        switcher_selectors = [
+            '[data-test-id*="team"]',
+            '[data-test-id*="workspace"]',
+            '[class*="team-switch"]',
+            '[class*="workspace"]',
+            '[class*="account-switch"]',
+        ]
+
+        for sel in switcher_selectors:
+            try:
+                el = page.locator(sel).first
+                if await el.count() > 0:
+                    print(f"[fetch_workspaces] Encontrado switcher: {sel}")
+                    await el.click()
+                    await asyncio.sleep(2)
+                    break
+            except Exception:
+                continue
+
+        # Wait for any API calls triggered by opening the switcher
         await asyncio.sleep(3)
 
-        # Navigate to team switch page to get all workspaces
-        await page.goto("https://run.reply.io/Home/SwitchTeam", wait_until="domcontentloaded", timeout=30_000)
-        await asyncio.sleep(3)
+        if captured_teams:
+            print(f"[fetch_workspaces] Capturados {len(captured_teams)} teams después de abrir switcher")
+            await browser.close()
+            return captured_teams
 
-        # Extract workspaces from the page
+        # Strategy 3: Extract from page HTML (SwitchTeam links, etc.)
+        print("[fetch_workspaces] Buscando links SwitchTeam en el HTML...")
         workspaces = await page.evaluate("""() => {
             const results = [];
-            // Look for links that contain SwitchTeam?teamId=
-            const links = document.querySelectorAll('a[href*="SwitchTeam"]');
+            const links = document.querySelectorAll('a[href*="SwitchTeam"], a[href*="switchTeam"], a[href*="team"]');
             for (const link of links) {
-                const match = link.href.match(/teamId=(\\d+)/);
+                const match = link.href.match(/teamId=(\\d+)/i);
                 if (match) {
                     results.push({
                         team_id: parseInt(match[1]),
@@ -51,24 +116,33 @@ async def fetch_workspaces(
                     });
                 }
             }
-            if (results.length === 0) {
-                // Fallback: look for any element with team data
-                const items = document.querySelectorAll('[class*="team"], [class*="workspace"], [data-team-id]');
-                for (const item of items) {
-                    const tid = item.getAttribute('data-team-id');
-                    if (tid) {
-                        results.push({
-                            team_id: parseInt(tid),
-                            name: item.textContent.trim()
-                        });
-                    }
-                }
-            }
             return results;
         }""")
 
+        if workspaces:
+            print(f"[fetch_workspaces] Encontrados {len(workspaces)} workspaces en HTML")
+            await browser.close()
+            return workspaces
+
+        # Strategy 4: Navigate to settings/team page
+        print("[fetch_workspaces] Intentando Settings > Team...")
+        await page.goto("https://run.reply.io/Dashboard/Material#/settings/team",
+                       wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(5)
+
+        if captured_teams:
+            print(f"[fetch_workspaces] Capturados {len(captured_teams)} teams desde settings")
+            await browser.close()
+            return captured_teams
+
+        # Debug: log what we see
+        page_url = page.url
+        page_title = await page.title()
+        print(f"[fetch_workspaces] FALLO - URL: {page_url}, Title: {page_title}")
+        print(f"[fetch_workspaces] captured_teams: {captured_teams}")
+
         await browser.close()
-        return workspaces
+        return []
 
 
 async def download_reports(
