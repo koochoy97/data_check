@@ -1,6 +1,6 @@
 """Playwright scraper for Reply.io - downloads People CSV + Email Activity CSV"""
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -148,13 +148,12 @@ async def _download_email_activity_csv(page, download_dir: Path, emit, max_expor
     await page.locator('[data-test-id="filters-drawer-toggle-button"]').click()
     await asyncio.sleep(1)
 
-    all_export_times = []
+    # Count existing notification links BEFORE triggering export
+    baseline_hrefs = await _get_notification_hrefs(page, emit)
+    emit(f"Notificaciones existentes antes del export: {len(baseline_hrefs)}")
+
     for export_attempt in range(1, max_export_attempts + 1):
         emit(f"Triggering export (intento {export_attempt}/{max_export_attempts})...")
-
-        # Record time before export
-        export_time = datetime.now()
-        all_export_times.append(export_time)
 
         # Click Export dropdown
         await page.locator('button:has-text("Export"):visible').first.click()
@@ -173,47 +172,56 @@ async def _download_email_activity_csv(page, download_dir: Path, emit, max_expor
 
         await asyncio.sleep(3)
 
-        # Poll Notification center for download link (5 min max, every 5s)
-        emit("Export en cola, esperando notificación...")
-        dest = await _poll_notification_download(page, download_dir, all_export_times, emit)
+        # Poll Notification center for a NEW download link (5 min max, every 5s)
+        emit("Export en cola, esperando notificación nueva...")
+        dest = await _poll_notification_download(page, download_dir, baseline_hrefs, emit)
         if dest:
             return dest
 
-        emit(f"No se encontró descarga en 5 min, reintentando...")
+        emit(f"No se encontró descarga nueva en 5 min, reintentando...")
 
     raise TimeoutError(f"Export no disponible después de {max_export_attempts} intentos")
 
 
+async def _get_notification_hrefs(page, emit) -> set[str]:
+    """Open notification panel and collect all 'here' link hrefs."""
+    bell = page.locator('xpath=/html/body/div[1]/div[1]/div[2]/div/div/div[2]/div[3]')
+    try:
+        await bell.click(timeout=5000)
+    except Exception:
+        pass
+    await asyncio.sleep(2)
+
+    hrefs = await page.evaluate("""() => {
+        const links = document.querySelectorAll('a');
+        const result = [];
+        for (const link of links) {
+            const txt = link.textContent.trim().toLowerCase();
+            if ((txt === 'here' || txt === 'here.') && link.offsetWidth > 0) {
+                result.push(link.href);
+            }
+        }
+        return result;
+    }""")
+
+    # Close panel
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(0.5)
+    await page.mouse.click(500, 400)
+
+    return set(hrefs)
+
+
 async def _poll_notification_download(
-    page, download_dir: Path, all_export_times: list[datetime], emit
+    page, download_dir: Path, baseline_hrefs: set[str], emit
 ) -> Path | None:
     """
-    Poll the Notification center (sidebar bell icon) for 5 min every 5s.
-    Accepts notifications matching ANY of the previous export times.
+    Poll the Notification center for a NEW download link (one not in baseline_hrefs).
     Returns Path if download succeeded, None if timed out.
     """
     max_wait = 300  # 5 min
     poll_interval = 5
 
-    # Build acceptable timestamps in 12h format from ALL export attempts
-    acceptable_times = []
-    for export_time in all_export_times:
-        for offset_min in range(7):
-            t = export_time.replace(second=0) + timedelta(minutes=offset_min)
-            h = t.hour
-            ampm = "AM" if h < 12 else "PM"
-            h12 = 12 if h == 0 else (h - 12 if h > 12 else h)
-            ts = f"{h12:02d}:{t.strftime('%M')} {ampm}"
-            if ts not in acceptable_times:
-                acceptable_times.append(ts)
-
-    # Detectar hora del navegador (puede diferir del servidor)
-    browser_time = await page.evaluate("new Date().toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hour12: true})")
-    server_time = datetime.now().strftime("%I:%M %p")
-    emit(f"Hora servidor: {server_time}, Hora navegador: {browser_time}")
-    emit(f"Tiempos aceptados para matching: {acceptable_times}")
-
-    # Bell icon xpath (sidebar notification bell)
     bell = page.locator('xpath=/html/body/div[1]/div[1]/div[2]/div/div/div[2]/div[3]')
 
     start = datetime.now()
@@ -229,55 +237,40 @@ async def _poll_notification_download(
             pass
         await asyncio.sleep(2)
 
-        # Scan for "here"/"here." download links with timestamp validation
-        result = await page.evaluate("""(acceptableTimes) => {
+        # Get all current "here" links
+        current_hrefs = await page.evaluate("""() => {
             const links = document.querySelectorAll('a');
-            const downloadLinks = [];
+            const result = [];
             for (const link of links) {
                 const txt = link.textContent.trim().toLowerCase();
                 if ((txt === 'here' || txt === 'here.') && link.offsetWidth > 0) {
-                    let container = link.closest('div');
-                    let ctx = '';
-                    let el = container;
-                    for (let i = 0; i < 5 && el; i++) {
-                        ctx = (el.textContent || '').trim();
-                        if (ctx.includes('AM') || ctx.includes('PM')) break;
-                        el = el.parentElement;
-                    }
-                    const matchesTime = acceptableTimes.some(t => ctx.includes(t));
-                    downloadLinks.push({ href: link.href, context: ctx.substring(0, 200), matchesTime });
+                    result.push(link.href);
                 }
             }
-            return downloadLinks;
-        }""", acceptable_times)
+            return result;
+        }""")
 
         elapsed = int((datetime.now() - start).total_seconds())
+        new_hrefs = [h for h in current_hrefs if h not in baseline_hrefs]
 
-        # Check for time-matched link
-        if result:
-            matching = [dl for dl in result if dl['matchesTime']]
-            emit(f"Poll {poll} ({elapsed}s) — {len(result)} links encontrados, {len(matching)} matchean tiempo. Tiempos aceptados: {acceptable_times[:4]}...")
-            for dl in result:
-                emit(f"  Link: match={dl['matchesTime']}, contexto: {dl['context'][:120]}")
+        if poll % 6 == 0 or new_hrefs:
+            emit(f"Poll {poll} ({elapsed}s) — {len(current_hrefs)} links totales, {len(new_hrefs)} nuevos")
 
-            if matching:
-                target = matching[0]
-                emit(f"Descarga disponible! Descargando...")
+        if new_hrefs:
+            target_href = new_hrefs[0]
+            emit(f"Nuevo link detectado! Descargando...")
 
-                here_link = page.locator(f'a[href="{target["href"]}"]:visible').first
-                if await here_link.count() == 0:
-                    here_link = page.locator('a:has-text("here"):visible').first
+            here_link = page.locator(f'a[href="{target_href}"]:visible').first
+            if await here_link.count() == 0:
+                here_link = page.locator('a:has-text("here"):visible').first
 
-                async with page.expect_download(timeout=60_000) as download_info:
-                    await here_link.click()
+            async with page.expect_download(timeout=60_000) as download_info:
+                await here_link.click()
 
-                download = await download_info.value
-                dest = download_dir / "email_activity.csv"
-                await download.save_as(str(dest))
-                return dest
-        else:
-            if poll % 6 == 0:  # cada ~30s
-                emit(f"Poll {poll} ({elapsed}s) — 0 links encontrados, esperando...")
+            download = await download_info.value
+            dest = download_dir / "email_activity.csv"
+            await download.save_as(str(dest))
+            return dest
 
         # Close notification panel before next poll
         await page.keyboard.press("Escape")
