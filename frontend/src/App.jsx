@@ -16,39 +16,30 @@ export default function App() {
   const [sheetUrl, setSheetUrl] = useState(null)
   const [files, setFiles] = useState([])
   const [error, setError] = useState(null)
-  const [syncing, setSyncing] = useState(false)
+  const [syncing, setSyncing] = useState(true)
   const logEndRef = useRef(null)
 
-  function loadClients() {
-    fetch(`${API}/clients`)
-      .then(r => r.json())
-      .then(data => {
-        setClients(data)
-        if (data.length > 0 && !selected) setSelected(data[0].id)
-      })
-      .catch(() => setError('No se pudo conectar al backend'))
-  }
-
-  useEffect(() => { loadClients() }, [])
-
-  function handleSync() {
+  useEffect(() => {
     setSyncing(true)
-    setError(null)
     fetch(`${API}/sync-clients`, { method: 'POST' })
       .then(r => r.json())
       .then(data => {
         if (data.error) {
           setError(data.error)
         } else {
-          loadClients()
+          const list = Object.entries(data.clients).map(([k, v]) => ({
+            id: k, name: v.display_name, team_id: v.team_id
+          }))
+          setClients(list)
+          if (list.length > 0) setSelected(list[0].id)
         }
         setSyncing(false)
       })
       .catch(() => {
-        setError('Error sincronizando clientes')
+        setError('No se pudo sincronizar con Reply.io')
         setSyncing(false)
       })
-  }
+  }, [])
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -102,30 +93,26 @@ export default function App() {
       <h1 style={styles.title}>Reply.io Report Validator</h1>
 
       <div style={styles.card}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <label style={{ ...styles.label, marginBottom: 0 }}>Cliente</label>
-          <button
-            onClick={handleSync}
-            disabled={syncing || running}
-            style={styles.syncButton}
-          >
-            {syncing ? 'Sincronizando...' : 'Sync Reply.io'}
-          </button>
-        </div>
+        <label style={styles.label}>
+          {syncing ? 'Cargando workspaces de Reply.io...' : 'Cliente'}
+        </label>
         <select
           value={selected}
           onChange={e => setSelected(e.target.value)}
-          disabled={running}
+          disabled={running || syncing}
           style={styles.select}
         >
-          {clients.map(c => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
+          {syncing
+            ? <option>Sincronizando...</option>
+            : clients.map(c => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))
+          }
         </select>
 
         <button
           onClick={handleGenerate}
-          disabled={running || !selected}
+          disabled={running || syncing || !selected}
           style={{
             ...styles.button,
             opacity: running ? 0.6 : 1,
@@ -237,16 +224,6 @@ const styles = {
     color: '#fff',
     background: '#2563eb',
     border: 'none',
-    borderRadius: 6,
-    cursor: 'pointer',
-  },
-  syncButton: {
-    padding: '6px 12px',
-    fontSize: 12,
-    fontWeight: 500,
-    color: '#2563eb',
-    background: '#eff6ff',
-    border: '1px solid #bfdbfe',
     borderRadius: 6,
     cursor: 'pointer',
   },
