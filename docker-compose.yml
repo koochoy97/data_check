@@ -6,12 +6,11 @@ services:
       - REPLY_IO_PASSWORD=${REPLY_IO_PASSWORD}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - GOOGLE_TOKEN_PATH=/app/config/token.json
+      - GOOGLE_TOKEN_JSON=${GOOGLE_TOKEN_JSON}
       - CLIENTS_CONFIG_PATH=/app/config/clients.json
       - DOWNLOAD_DIR=/tmp/reports
     volumes:
       - ./backend/clients.json:/app/config/clients.json:ro
-      - ./token.json:/app/config/token.json
     ports:
       - "8000:8000"
 
