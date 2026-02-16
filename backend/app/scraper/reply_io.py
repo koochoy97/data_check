@@ -207,6 +207,12 @@ async def _poll_notification_download(
             if ts not in acceptable_times:
                 acceptable_times.append(ts)
 
+    # Detectar hora del navegador (puede diferir del servidor)
+    browser_time = await page.evaluate("new Date().toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hour12: true})")
+    server_time = datetime.now().strftime("%I:%M %p")
+    emit(f"Hora servidor: {server_time}, Hora navegador: {browser_time}")
+    emit(f"Tiempos aceptados para matching: {acceptable_times}")
+
     # Bell icon xpath (sidebar notification bell)
     bell = page.locator('xpath=/html/body/div[1]/div[1]/div[2]/div/div/div[2]/div[3]')
 
@@ -245,12 +251,18 @@ async def _poll_notification_download(
             return downloadLinks;
         }""", acceptable_times)
 
+        elapsed = int((datetime.now() - start).total_seconds())
+
         # Check for time-matched link
         if result:
             matching = [dl for dl in result if dl['matchesTime']]
+            emit(f"Poll {poll} ({elapsed}s) — {len(result)} links encontrados, {len(matching)} matchean tiempo. Tiempos aceptados: {acceptable_times[:4]}...")
+            for dl in result:
+                emit(f"  Link: match={dl['matchesTime']}, contexto: {dl['context'][:120]}")
+
             if matching:
                 target = matching[0]
-                emit(f"Descarga disponible (poll {poll}): {target['context'][:80]}")
+                emit(f"Descarga disponible! Descargando...")
 
                 here_link = page.locator(f'a[href="{target["href"]}"]:visible').first
                 if await here_link.count() == 0:
@@ -263,15 +275,14 @@ async def _poll_notification_download(
                 dest = download_dir / "email_activity.csv"
                 await download.save_as(str(dest))
                 return dest
+        else:
+            if poll % 6 == 0:  # cada ~30s
+                emit(f"Poll {poll} ({elapsed}s) — 0 links encontrados, esperando...")
 
         # Close notification panel before next poll
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.5)
         await page.mouse.click(500, 400)
-
-        elapsed = int((datetime.now() - start).total_seconds())
-        if poll % 12 == 0:  # ~every 60s
-            emit(f"Esperando export... ({elapsed}s)")
 
         await asyncio.sleep(poll_interval)
 
