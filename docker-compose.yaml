@@ -7,10 +7,10 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_TOKEN_JSON=${GOOGLE_TOKEN_JSON}
-      - CLIENTS_CONFIG_PATH=/app/config/clients.json
+      - CLIENTS_CONFIG_PATH=/app/clients.json
       - DOWNLOAD_DIR=/tmp/reports
-    volumes:
-      - ./backend/clients.json:/app/config/clients.json:ro
+    networks:
+      - app
 
   frontend:
     build: ./frontend
@@ -18,3 +18,8 @@ services:
       - "3000:80"
     depends_on:
       - backend
+    networks:
+      - app
+
+networks:
+  app:
