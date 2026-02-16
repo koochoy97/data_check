@@ -11,8 +11,6 @@ services:
       - DOWNLOAD_DIR=/tmp/reports
     volumes:
       - ./backend/clients.json:/app/config/clients.json:ro
-    ports:
-      - "8000:8000"
 
   frontend:
     build: ./frontend
