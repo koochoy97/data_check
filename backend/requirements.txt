@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+playwright
+pandas
+gspread
+google-auth
+google-auth-oauthlib
+google-api-python-client
+openpyxl
+sse-starlette
+python-dotenv
