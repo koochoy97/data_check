@@ -2,6 +2,8 @@
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -17,7 +19,59 @@ from app.processing.carga_personas import procesar_carga
 from app.processing.envio_correos import procesar_correos
 from app.sheets.builder import crear_spreadsheet
 
-app = FastAPI(title="Reply.io Report Validator")
+async def _sync_workspaces():
+    """Shared logic: scrape Reply.io workspaces and update clients.json"""
+    headless = os.getenv("HEADLESS", "true").lower() != "false"
+    workspaces = await fetch_workspaces(
+        email=REPLY_IO_EMAIL,
+        password=REPLY_IO_PASSWORD,
+        headless=headless,
+    )
+    if not workspaces:
+        return None
+
+    clients = load_clients()
+    for ws in workspaces:
+        key = ws["name"].lower().replace(" ", "_")
+        if key not in clients:
+            clients[key] = {"display_name": ws["name"], "team_id": ws["team_id"]}
+        else:
+            clients[key]["team_id"] = ws["team_id"]
+            clients[key]["display_name"] = ws["name"]
+
+    with open(CLIENTS_CONFIG_PATH, "w") as f:
+        json.dump(clients, f, indent=2, ensure_ascii=False)
+
+    return clients
+
+
+async def _daily_sync_cron():
+    """Background task: sync workspaces every day at 00:00"""
+    while True:
+        now = datetime.now()
+        midnight = datetime.combine(now.date(), time(0, 0)) + timedelta(days=1)
+        wait_seconds = (midnight - now).total_seconds()
+        print(f"[cron] Próximo sync de workspaces en {wait_seconds:.0f}s ({midnight})")
+        await asyncio.sleep(wait_seconds)
+        try:
+            print("[cron] Ejecutando sync de workspaces...")
+            result = await _sync_workspaces()
+            if result:
+                print(f"[cron] Sync exitoso: {len(result)} clientes")
+            else:
+                print("[cron] Sync falló: no se encontraron workspaces")
+        except Exception as e:
+            print(f"[cron] Error en sync: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(_daily_sync_cron())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="Reply.io Report Validator", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -160,34 +214,10 @@ def download_file(client_id: str, filename: str):
 @app.post("/api/sync-clients")
 async def sync_clients():
     """Scrape all workspaces from Reply.io and update clients.json"""
-    headless = os.getenv("HEADLESS", "true").lower() != "false"
-    workspaces = await fetch_workspaces(
-        email=REPLY_IO_EMAIL,
-        password=REPLY_IO_PASSWORD,
-        headless=headless,
-    )
-    if not workspaces:
-        return {"error": "No se encontraron workspaces", "workspaces": []}
-
-    # Merge with existing clients (preserve existing config)
-    clients = load_clients()
-    for ws in workspaces:
-        key = ws["name"].lower().replace(" ", "_")
-        if key not in clients:
-            clients[key] = {
-                "display_name": ws["name"],
-                "team_id": ws["team_id"],
-            }
-        else:
-            # Update team_id and name in case they changed
-            clients[key]["team_id"] = ws["team_id"]
-            clients[key]["display_name"] = ws["name"]
-
-    # Write updated clients.json
-    with open(CLIENTS_CONFIG_PATH, "w") as f:
-        json.dump(clients, f, indent=2, ensure_ascii=False)
-
-    return {"synced": len(workspaces), "clients": clients}
+    clients = await _sync_workspaces()
+    if clients is None:
+        return {"error": "No se encontraron workspaces"}
+    return {"synced": len(clients), "clients": clients}
 
 
 @app.get("/api/health")

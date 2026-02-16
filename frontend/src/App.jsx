@@ -16,30 +16,39 @@ export default function App() {
   const [sheetUrl, setSheetUrl] = useState(null)
   const [files, setFiles] = useState([])
   const [error, setError] = useState(null)
-  const [syncing, setSyncing] = useState(true)
+  const [syncing, setSyncing] = useState(false)
   const logEndRef = useRef(null)
 
-  useEffect(() => {
+  function loadClients() {
+    fetch(`${API}/clients`)
+      .then(r => r.json())
+      .then(data => {
+        setClients(data)
+        if (data.length > 0 && !selected) setSelected(data[0].id)
+      })
+      .catch(() => setError('No se pudo conectar al backend'))
+  }
+
+  useEffect(() => { loadClients() }, [])
+
+  function handleSyncWorkspaces() {
     setSyncing(true)
+    setError(null)
     fetch(`${API}/sync-clients`, { method: 'POST' })
       .then(r => r.json())
       .then(data => {
         if (data.error) {
           setError(data.error)
         } else {
-          const list = Object.entries(data.clients).map(([k, v]) => ({
-            id: k, name: v.display_name, team_id: v.team_id
-          }))
-          setClients(list)
-          if (list.length > 0) setSelected(list[0].id)
+          loadClients()
         }
         setSyncing(false)
       })
       .catch(() => {
-        setError('No se pudo sincronizar con Reply.io')
+        setError('Error sincronizando workspaces')
         setSyncing(false)
       })
-  }, [])
+  }
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -93,21 +102,29 @@ export default function App() {
       <h1 style={styles.title}>Reply.io Report Validator</h1>
 
       <div style={styles.card}>
-        <label style={styles.label}>
-          {syncing ? 'Cargando workspaces de Reply.io...' : 'Cliente'}
-        </label>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <label style={{ ...styles.label, marginBottom: 0 }}>Cliente</label>
+          <button
+            onClick={handleSyncWorkspaces}
+            disabled={syncing || running}
+            style={{
+              ...styles.syncButton,
+              opacity: syncing ? 0.6 : 1,
+              cursor: syncing ? 'wait' : 'pointer',
+            }}
+          >
+            {syncing ? 'Sincronizando...' : 'Actualizar Workspaces'}
+          </button>
+        </div>
         <select
           value={selected}
           onChange={e => setSelected(e.target.value)}
           disabled={running || syncing}
           style={styles.select}
         >
-          {syncing
-            ? <option>Sincronizando...</option>
-            : clients.map(c => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))
-          }
+          {clients.map(c => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
         </select>
 
         <button
@@ -115,7 +132,7 @@ export default function App() {
           disabled={running || syncing || !selected}
           style={{
             ...styles.button,
-            opacity: running ? 0.6 : 1,
+            opacity: (running || syncing) ? 0.6 : 1,
             cursor: running ? 'wait' : 'pointer',
           }}
         >
@@ -226,6 +243,15 @@ const styles = {
     border: 'none',
     borderRadius: 6,
     cursor: 'pointer',
+  },
+  syncButton: {
+    padding: '6px 12px',
+    fontSize: 12,
+    fontWeight: 500,
+    color: '#2563eb',
+    background: '#eff6ff',
+    border: '1px solid #bfdbfe',
+    borderRadius: 6,
   },
   logCard: {
     background: '#1a1a2e',
