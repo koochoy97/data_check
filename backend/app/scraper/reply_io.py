@@ -5,6 +5,72 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 
+async def fetch_workspaces(
+    email: str,
+    password: str,
+    headless: bool = True,
+) -> list[dict]:
+    """
+    Logs into Reply.io and scrapes all available workspaces.
+    Returns: [{"team_id": 123, "name": "Workspace Name"}, ...]
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
+        page = await context.new_page()
+
+        # LOGIN
+        await page.goto("https://run.reply.io/", wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(3)
+
+        if "oauth" in page.url or "login" in page.url.lower():
+            await page.locator("input:visible").first.fill(email)
+            await page.locator('input[type="password"]:visible').fill(password)
+            await page.get_by_role("button", name="Sign in").click()
+            try:
+                await page.wait_for_url("**/run.reply.io/**", timeout=20_000)
+            except Exception:
+                pass
+        await asyncio.sleep(3)
+
+        # Navigate to team switch page to get all workspaces
+        await page.goto("https://run.reply.io/Home/SwitchTeam", wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(3)
+
+        # Extract workspaces from the page
+        workspaces = await page.evaluate("""() => {
+            const results = [];
+            // Look for links that contain SwitchTeam?teamId=
+            const links = document.querySelectorAll('a[href*="SwitchTeam"]');
+            for (const link of links) {
+                const match = link.href.match(/teamId=(\\d+)/);
+                if (match) {
+                    results.push({
+                        team_id: parseInt(match[1]),
+                        name: link.textContent.trim()
+                    });
+                }
+            }
+            if (results.length === 0) {
+                // Fallback: look for any element with team data
+                const items = document.querySelectorAll('[class*="team"], [class*="workspace"], [data-team-id]');
+                for (const item of items) {
+                    const tid = item.getAttribute('data-team-id');
+                    if (tid) {
+                        results.push({
+                            team_id: parseInt(tid),
+                            name: item.textContent.trim()
+                        });
+                    }
+                }
+            }
+            return results;
+        }""")
+
+        await browser.close()
+        return workspaces
+
+
 async def download_reports(
     email: str,
     password: str,

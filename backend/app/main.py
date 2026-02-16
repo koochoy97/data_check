@@ -10,9 +10,9 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR
+from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, CLIENTS_CONFIG_PATH
 from app.google_auth import get_gspread_client, get_sheets_service, get_drive_service
-from app.scraper.reply_io import download_reports
+from app.scraper.reply_io import download_reports, fetch_workspaces
 from app.processing.carga_personas import procesar_carga
 from app.processing.envio_correos import procesar_correos
 from app.sheets.builder import crear_spreadsheet
@@ -155,6 +155,39 @@ def download_file(client_id: str, filename: str):
     if not path.exists():
         return {"error": "File not found"}
     return FileResponse(path, filename=filename, media_type="text/csv")
+
+
+@app.post("/api/sync-clients")
+async def sync_clients():
+    """Scrape all workspaces from Reply.io and update clients.json"""
+    headless = os.getenv("HEADLESS", "true").lower() != "false"
+    workspaces = await fetch_workspaces(
+        email=REPLY_IO_EMAIL,
+        password=REPLY_IO_PASSWORD,
+        headless=headless,
+    )
+    if not workspaces:
+        return {"error": "No se encontraron workspaces", "workspaces": []}
+
+    # Merge with existing clients (preserve existing config)
+    clients = load_clients()
+    for ws in workspaces:
+        key = ws["name"].lower().replace(" ", "_")
+        if key not in clients:
+            clients[key] = {
+                "display_name": ws["name"],
+                "team_id": ws["team_id"],
+            }
+        else:
+            # Update team_id and name in case they changed
+            clients[key]["team_id"] = ws["team_id"]
+            clients[key]["display_name"] = ws["name"]
+
+    # Write updated clients.json
+    with open(CLIENTS_CONFIG_PATH, "w") as f:
+        json.dump(clients, f, indent=2, ensure_ascii=False)
+
+    return {"synced": len(workspaces), "clients": clients}
 
 
 @app.get("/api/health")
