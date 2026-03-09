@@ -13,11 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, CLIENTS_CONFIG_PATH
-from app.google_auth import get_gspread_client, get_sheets_service, get_drive_service
 from app.scraper.reply_io import download_reports, fetch_workspaces
-from app.processing.carga_personas import procesar_carga
-from app.processing.envio_correos import procesar_correos
-from app.sheets.builder import crear_spreadsheet
 
 async def _sync_workspaces():
     """Shared logic: scrape Reply.io workspaces and update clients.json"""
@@ -137,44 +133,10 @@ async def generate_report(client_id: str):
             on_progress(f"email_activity.csv descargado ({email_size:,} bytes)")
             on_file("email_activity.csv", email_size, f"/api/files/{client_id}/email_activity.csv")
 
-            # Step 2: Create Google Sheet
-            on_progress("Creando Google Sheet...")
-            gc = get_gspread_client()
-            sheets_service = get_sheets_service()
-            drive_service = get_drive_service()
-            spreadsheet = crear_spreadsheet(display_name, gc, drive_service)
-            on_progress("Google Sheet creado")
-
-            # Step 3: Process People CSV
-            on_progress("Inicio analisis people.csv...")
-            result_personas = procesar_carga(
-                csv_path=reports["personas"],
-                spreadsheet=spreadsheet,
-                service=sheets_service,
-            )
-            on_progress(f"Analisis people.csv exitoso — {result_personas['rows']} filas, {result_personas['pivots']} pivots")
-
-            # Step 4: Process Email Activity CSV
-            on_progress("Inicio analisis email_activity.csv...")
-            result_correos = procesar_correos(
-                csv_path=reports["correos"],
-                spreadsheet=spreadsheet,
-                service=sheets_service,
-            )
-            on_progress(f"Analisis email_activity.csv exitoso — {result_correos['rows']} filas, {result_correos['pivots']} pivots, {result_correos['reply_rate_sheets']} reply rates")
-
-            # Step 5: Delete temp sheet
-            try:
-                temp_sheet = spreadsheet.worksheet("_temp")
-                spreadsheet.del_worksheet(temp_sheet)
-            except Exception:
-                pass
-
-            # Done
+            # Done — solo descarga de reportes
             await queue.put({
                 "type": "done",
-                "message": f"Listo! Reporte generado para {display_name}",
-                "url": spreadsheet.url,
+                "message": f"Listo! Reportes descargados para {display_name}",
             })
 
         except Exception as e:

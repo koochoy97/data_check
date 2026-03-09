@@ -2,5 +2,405 @@
   "cifur": {
     "display_name": "Cifur",
     "team_id": 457612
+  },
+  "licuadora_a": {
+    "display_name": "Licuadora A",
+    "team_id": 328003
+  },
+  "devorame_otra_vez": {
+    "display_name": "Devorame otra Vez",
+    "team_id": 471217
+  },
+  "prueba": {
+    "display_name": "Prueba",
+    "team_id": 471670
+  },
+  "climatta": {
+    "display_name": "Climatta",
+    "team_id": 456680
+  },
+  "ecssa": {
+    "display_name": "Ecssa",
+    "team_id": 473015
+  },
+  "brocco": {
+    "display_name": "Brocco",
+    "team_id": 469906
+  },
+  "innevo_1": {
+    "display_name": "Innevo 1",
+    "team_id": 456810
+  },
+  "atomic4": {
+    "display_name": "Atomic4",
+    "team_id": 452471
+  },
+  "super_acesso": {
+    "display_name": "Super Acesso",
+    "team_id": 446912
+  },
+  "celeru": {
+    "display_name": "Celeru",
+    "team_id": 444146
+  },
+  "voce": {
+    "display_name": "Voce",
+    "team_id": 466759
+  },
+  "thovaris": {
+    "display_name": "Thovaris",
+    "team_id": 464955
+  },
+  "hermes_valores": {
+    "display_name": "Hermes Valores",
+    "team_id": 438240
+  },
+  "bold_creators": {
+    "display_name": "Bold Creators",
+    "team_id": 440501
+  },
+  "habla_latam": {
+    "display_name": "Habla LATAM",
+    "team_id": 457613
+  },
+  "arcoverde": {
+    "display_name": "Arcoverde",
+    "team_id": 456844
+  },
+  "d4sign": {
+    "display_name": "D4sign",
+    "team_id": 437390
+  },
+  "panda_motions": {
+    "display_name": "Panda Motions",
+    "team_id": 439766
+  },
+  "suple": {
+    "display_name": "Suple",
+    "team_id": 435695
+  },
+  "innevo_2": {
+    "display_name": "Innevo 2",
+    "team_id": 456811
+  },
+  "nativo": {
+    "display_name": "Nativo",
+    "team_id": 455824
+  },
+  "crowdar": {
+    "display_name": "Crowdar",
+    "team_id": 432599
+  },
+  "safe_itb": {
+    "display_name": "Safe ITB",
+    "team_id": 474017
+  },
+  "adl": {
+    "display_name": "ADL",
+    "team_id": 472029
+  },
+  "tekton": {
+    "display_name": "Tekton",
+    "team_id": 470234
+  },
+  "prodigy": {
+    "display_name": "Prodigy",
+    "team_id": 432231
+  },
+  "sd_group": {
+    "display_name": "SD Group",
+    "team_id": 456071
+  },
+  "imagina": {
+    "display_name": "Imagina",
+    "team_id": 432230
+  },
+  "cxc": {
+    "display_name": "CXC",
+    "team_id": 467007
+  },
+  "caleidos": {
+    "display_name": "Caleidos",
+    "team_id": 454974
+  },
+  "likelab": {
+    "display_name": "Likelab",
+    "team_id": 430941
+  },
+  "made2web": {
+    "display_name": "Made2Web",
+    "team_id": 435694
+  },
+  "pkf": {
+    "display_name": "PKF",
+    "team_id": 430942
+  },
+  "matraka": {
+    "display_name": "Matraka",
+    "team_id": 463430
+  },
+  "tuxdi": {
+    "display_name": "Tuxdi",
+    "team_id": 449135
+  },
+  "filig": {
+    "display_name": "Filig",
+    "team_id": 427325
+  },
+  "saal": {
+    "display_name": "Saal",
+    "team_id": 453753
+  },
+  "geofile": {
+    "display_name": "Geofile",
+    "team_id": 452382
+  },
+  "fresh_consulting": {
+    "display_name": "Fresh Consulting",
+    "team_id": 426640
+  },
+  "infoportal": {
+    "display_name": "Infoportal",
+    "team_id": 452383
+  },
+  "barões": {
+    "display_name": "Barões",
+    "team_id": 449472
+  },
+  "mp_recycling": {
+    "display_name": "MP Recycling",
+    "team_id": 426638
+  },
+  "arde": {
+    "display_name": "Arde",
+    "team_id": 466757
+  },
+  "belia_trading": {
+    "display_name": "Belia Trading",
+    "team_id": 425288
+  },
+  "greenfive": {
+    "display_name": "Greenfive",
+    "team_id": 463111
+  },
+  "re9": {
+    "display_name": "Re9",
+    "team_id": 460652
+  },
+  "7graus": {
+    "display_name": "7Graus",
+    "team_id": 463109
+  },
+  "big_cheese": {
+    "display_name": "Big Cheese",
+    "team_id": 421171
+  },
+  "quix": {
+    "display_name": "Quix",
+    "team_id": 444144
+  },
+  "comercial_ai": {
+    "display_name": "Comercial AI",
+    "team_id": 423311
+  },
+  "tribeca": {
+    "display_name": "Tribeca",
+    "team_id": 387637
+  },
+  "neodata": {
+    "display_name": "Neodata",
+    "team_id": 440505
+  },
+  "exagono": {
+    "display_name": "Exagono",
+    "team_id": 362761
+  },
+  "fin_de_año": {
+    "display_name": "Fin de año",
+    "team_id": 464157
+  },
+  "mosaico": {
+    "display_name": "Mosaico",
+    "team_id": 460650
+  },
+  "hakalab": {
+    "display_name": "Hakalab",
+    "team_id": 438231
+  },
+  "netred": {
+    "display_name": "NetRed",
+    "team_id": 362759
+  },
+  "caleidos_chile": {
+    "display_name": "Caleidos Chile",
+    "team_id": 466226
+  },
+  "nr7": {
+    "display_name": "NR7",
+    "team_id": 446118
+  },
+  "practica": {
+    "display_name": "Practica",
+    "team_id": 444895
+  },
+  "hanakua": {
+    "display_name": "Hanakua",
+    "team_id": 367024
+  },
+  "udem_posgrados": {
+    "display_name": "UDEM Posgrados",
+    "team_id": 387640
+  },
+  "cheil": {
+    "display_name": "Cheil",
+    "team_id": 416300
+  },
+  "omen": {
+    "display_name": "Omen",
+    "team_id": 410785
+  },
+  "ruler": {
+    "display_name": "Ruler",
+    "team_id": 463110
+  },
+  "logikaline_-_ggu": {
+    "display_name": "Logikaline - GGU",
+    "team_id": 462233
+  },
+  "intelego": {
+    "display_name": "Intelego",
+    "team_id": 444145
+  },
+  "leaf_-_staffing": {
+    "display_name": "Leaf - Staffing",
+    "team_id": 329651
+  },
+  "best": {
+    "display_name": "Best",
+    "team_id": 458593
+  },
+  "capability_building": {
+    "display_name": "Capability Building",
+    "team_id": 439774
+  },
+  "fantasma_films": {
+    "display_name": "Fantasma Films",
+    "team_id": 434818
+  },
+  "sinaptic": {
+    "display_name": "Sinaptic",
+    "team_id": 331271
+  },
+  "licuadora_b": {
+    "display_name": "Licuadora B",
+    "team_id": 339969
+  },
+  "scientia": {
+    "display_name": "Scientia",
+    "team_id": 431891
+  },
+  "vfg_consulting": {
+    "display_name": "VFG Consulting",
+    "team_id": 342386
+  },
+  "nico_personal": {
+    "display_name": "Nico Personal",
+    "team_id": 350710
+  },
+  "comunal": {
+    "display_name": "Comunal",
+    "team_id": 350587
+  },
+  "it_analytics": {
+    "display_name": "IT Analytics",
+    "team_id": 350669
+  },
+  "aplin": {
+    "display_name": "APLIN",
+    "team_id": 466738
+  },
+  "infuy": {
+    "display_name": "Infuy",
+    "team_id": 447461
+  },
+  "in_motion": {
+    "display_name": "In Motion",
+    "team_id": 426615
+  },
+  "siete_-_staffing": {
+    "display_name": "Siete - Staffing",
+    "team_id": 328027
+  },
+  "stefanini": {
+    "display_name": "Stefanini",
+    "team_id": 339964
+  },
+  "izo": {
+    "display_name": "IZO",
+    "team_id": 466748
+  },
+  "caleidos_canada": {
+    "display_name": "Caleidos Canada",
+    "team_id": 464958
+  },
+  "hermes": {
+    "display_name": "Hermes",
+    "team_id": 422193
+  },
+  "cerebro": {
+    "display_name": "Cerebro",
+    "team_id": 328007
+  },
+  "compucloud": {
+    "display_name": "Compucloud",
+    "team_id": 328006
+  },
+  "csti": {
+    "display_name": "CSTI",
+    "team_id": 328005
+  },
+  "siete_-_servicio": {
+    "display_name": "Siete - Servicio",
+    "team_id": 327997
+  },
+  "meriti": {
+    "display_name": "Meriti",
+    "team_id": 327998
+  },
+  "innocean": {
+    "display_name": "Innocean",
+    "team_id": 328002
+  },
+  "izei": {
+    "display_name": "IZEI",
+    "team_id": 461834
+  },
+  "devthion": {
+    "display_name": "Devthion",
+    "team_id": 457611
+  },
+  "quix_2": {
+    "display_name": "Quix 2",
+    "team_id": 456813
+  },
+  "sod": {
+    "display_name": "SOD",
+    "team_id": 433333
+  },
+  "default_team": {
+    "display_name": "Default Team",
+    "team_id": 327175
+  },
+  "nach": {
+    "display_name": "Nach",
+    "team_id": 328000
+  },
+  "rpp": {
+    "display_name": "RPP",
+    "team_id": 328001
+  },
+  "udem": {
+    "display_name": "UDEM",
+    "team_id": 328004
   }
 }

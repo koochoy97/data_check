@@ -1,8 +1,34 @@
 """Playwright scraper for Reply.io - downloads People CSV + Email Activity CSV"""
 import asyncio
+import random
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright
+
+
+async def _retry(coro_fn, max_attempts=3, base_delay=5, emit=None, label="operación"):
+    """Retry an async operation with exponential backoff + jitter."""
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await coro_fn()
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts:
+                delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 3)
+                msg = f"[retry] {label} falló (intento {attempt}/{max_attempts}): {e}. Reintentando en {delay:.0f}s..."
+                if emit:
+                    emit(msg)
+                else:
+                    print(msg)
+                await asyncio.sleep(delay)
+            else:
+                msg = f"[retry] {label} falló después de {max_attempts} intentos: {e}"
+                if emit:
+                    emit(msg)
+                else:
+                    print(msg)
+    raise last_error
 
 
 async def fetch_workspaces(
@@ -154,9 +180,12 @@ async def download_reports(
     headless: bool = True,
 ) -> dict[str, Path]:
     """
-    Downloads 2 CSVs from Reply.io:
-    1. People CSV (All_prospects.csv) - via People > Select All > More > Export to CSV > Basic fields
+    Downloads 2 CSVs from Reply.io in parallel:
+    1. People CSV (All fields) - via People > Select All > More > Export to CSV > All fields
     2. Email Activity CSV - via Reports/Emails > Filter Last Year > Export contact CSV
+
+    Both are async exports via notification center. We trigger both on separate tabs,
+    then poll notifications for both download links simultaneously.
 
     Returns: {"personas": Path, "correos": Path}
     """
@@ -200,26 +229,42 @@ async def download_reports(
         )
         await asyncio.sleep(8)
 
-        # ═══════════════════════════════════════
-        # REPORT 1: People CSV (Basic fields)
-        # ═══════════════════════════════════════
-        emit("Descargando reporte de Personas...")
-        people_csv = await _download_people_csv(page, download_dir)
+        # ── TRIGGER BOTH EXPORTS (parallel on two tabs) ──
+        page2 = await context.new_page()
 
-        # ═══════════════════════════════════════
-        # REPORT 2: Email Activity CSV (contact-specific)
-        # ═══════════════════════════════════════
-        emit("Descargando reporte de Correos (contact-specific)...")
-        email_csv = await _download_email_activity_csv(page, download_dir, emit)
+        emit("Disparando export de Personas (All fields)...")
+        people_direct = await _retry(
+            lambda: _trigger_people_export(page, download_dir, emit),
+            max_attempts=3, base_delay=5, emit=emit, label="trigger People export",
+        )
 
+        emit("Disparando export de Correos (contact CSV)...")
+        await _retry(
+            lambda: _trigger_email_export(page2, emit),
+            max_attempts=3, base_delay=5, emit=emit, label="trigger Email export",
+        )
+
+        if people_direct:
+            emit(f"People CSV descargado directamente ({people_direct.stat().st_size:,} bytes)")
+
+        # ── POLL NOTIFICATIONS FOR REMAINING DOWNLOADS ──
+        need_people = people_direct is None
+        emit(f"Esperando descargas en notificaciones (people={need_people}, correos=True)...")
+        people_notif, email_csv = await _poll_both_downloads(
+            page, page2, download_dir, emit, need_people=need_people,
+        )
+
+        people_csv = people_direct or people_notif
+
+        await page2.close()
         await browser.close()
 
         return {"personas": people_csv, "correos": email_csv}
 
 
-async def _download_people_csv(page, download_dir: Path) -> Path:
-    """People > All tab > Select All in list > More > Export to CSV > Basic fields"""
-
+async def _trigger_people_export(page, download_dir: Path, emit) -> Path | None:
+    """Navigate to People, select all, trigger All fields export.
+    Returns Path if direct download happened, None if async (notification)."""
     await page.goto(
         "https://run.reply.io/Dashboard/Material#/people/list",
         wait_until="domcontentloaded",
@@ -227,40 +272,50 @@ async def _download_people_csv(page, download_dir: Path) -> Path:
     )
     await asyncio.sleep(5)
 
-    # Click "All" tab
-    await page.locator('text=/^All\\s*\\(/').first.click()
+    # Click "All" tab — retry because Reply UI is slow to render
+    for _ in range(3):
+        try:
+            await page.locator('text=/^All\\s*\\(/').first.click(timeout=10_000)
+            break
+        except Exception:
+            await asyncio.sleep(2)
     await asyncio.sleep(2)
 
-    # Click the "All" dropdown (select-control-button)
-    await page.locator('[data-test-id="select-control-button"]').click()
+    # Select all in list
+    for _ in range(3):
+        try:
+            await page.locator('[data-test-id="select-control-button"]').click(timeout=10_000)
+            break
+        except Exception:
+            await asyncio.sleep(2)
     await asyncio.sleep(1)
 
-    # Click "All in list"
-    await page.locator("text=All in list").first.click()
+    await page.locator("text=All in list").first.click(timeout=10_000)
     await asyncio.sleep(2)
 
-    # Click "More" dropdown
-    await page.locator('button:has-text("More"):visible').first.click()
+    # More > Export to CSV > All fields
+    await page.locator('button:has-text("More"):visible').first.click(timeout=10_000)
+    await asyncio.sleep(1)
+    await page.locator("text=Export to CSV").hover(timeout=10_000)
     await asyncio.sleep(1)
 
-    # Hover "Export to CSV" (hover shows submenu, click closes it)
-    await page.locator("text=Export to CSV").hover()
-    await asyncio.sleep(1)
+    # Try to catch direct download (some workspaces download immediately)
+    try:
+        async with page.expect_download(timeout=10_000) as download_info:
+            await page.locator("text=/^All fields$/").first.click(timeout=5_000)
+        download = await download_info.value
+        dest = download_dir / "people.csv"
+        await download.save_as(str(dest))
+        emit("Export de Personas: descarga directa")
+        return dest
+    except Exception:
+        # No direct download — it went to notification center (async)
+        emit("Export de Personas disparado (async, esperando notificación)")
+        return None
 
-    # Click "Basic fields" — triggers direct download
-    async with page.expect_download(timeout=60_000) as download_info:
-        await page.locator("text=/^Basic fields$/").first.click()
 
-    download = await download_info.value
-    dest = download_dir / "people.csv"
-    await download.save_as(str(dest))
-    return dest
-
-
-async def _download_email_activity_csv(page, download_dir: Path, emit, max_export_attempts: int = 4) -> Path:
-    """Reports/Emails > Filter Last Year > Export contact CSV > poll Notification center.
-    Retries the full export up to max_export_attempts times, polling 5 min each."""
-
+async def _trigger_email_export(page, emit):
+    """Navigate to Reports/Emails, set filters, trigger export."""
     await page.goto(
         "https://run.reply.io/Dashboard/Material#/reports/emails",
         wait_until="domcontentloaded",
@@ -268,155 +323,264 @@ async def _download_email_activity_csv(page, download_dir: Path, emit, max_expor
     )
     await asyncio.sleep(5)
 
-    # Open Filters panel
-    await page.locator('[data-test-id="filters-drawer-toggle-button"]').click()
+    # Open Filters > Date > Last Year > Apply (with retries on each step)
+    for _ in range(3):
+        try:
+            await page.locator('[data-test-id="filters-drawer-toggle-button"]').click(timeout=10_000)
+            break
+        except Exception:
+            await asyncio.sleep(2)
     await asyncio.sleep(1)
 
-    # Expand Date filter
-    await page.locator("text=Date").first.click()
+    await page.locator("text=Date").first.click(timeout=10_000)
     await asyncio.sleep(1)
-
-    # Select "Last Year"
-    await page.locator("text=Last Year").first.click()
+    await page.locator("text=Last Year").first.click(timeout=10_000)
     await asyncio.sleep(1)
-
-    # Click Apply
-    await page.locator('button:has-text("Apply")').click()
+    await page.locator('button:has-text("Apply")').click(timeout=10_000)
     await asyncio.sleep(5)
 
     # Close Filters
-    await page.locator('[data-test-id="filters-drawer-toggle-button"]').click()
+    await page.locator('[data-test-id="filters-drawer-toggle-button"]').click(timeout=10_000)
     await asyncio.sleep(1)
 
-    # Count existing notification links BEFORE triggering export
-    baseline_hrefs = await _get_notification_hrefs(page, emit)
-    emit(f"Notificaciones existentes antes del export: {len(baseline_hrefs)}")
+    # Trigger export
+    await page.locator('button:has-text("Export"):visible').first.click(timeout=10_000)
+    await asyncio.sleep(1)
+    await page.locator("text=Export contact CSV").click(timeout=10_000)
+    await asyncio.sleep(0.5)
 
-    for export_attempt in range(1, max_export_attempts + 1):
-        emit(f"Triggering export (intento {export_attempt}/{max_export_attempts})...")
+    export_btn = page.locator('.MuiPopover-paper button:has-text("Export"), .MuiPaper-root button:has-text("Export")')
+    if await export_btn.count() > 0:
+        await export_btn.first.click()
+    else:
+        await page.locator('button:has-text("Export"):visible').last.click()
 
-        # Click Export dropdown
-        await page.locator('button:has-text("Export"):visible').first.click()
-        await asyncio.sleep(1)
-
-        # Select "Export contact CSV"
-        await page.locator("text=Export contact CSV").click()
-        await asyncio.sleep(0.5)
-
-        # Click Export button inside the popover
-        export_btn = page.locator('.MuiPopover-paper button:has-text("Export"), .MuiPaper-root button:has-text("Export")')
-        if await export_btn.count() > 0:
-            await export_btn.first.click()
-        else:
-            await page.locator('button:has-text("Export"):visible').last.click()
-
-        await asyncio.sleep(3)
-
-        # Poll Notification center for a NEW download link (5 min max, every 5s)
-        emit("Export en cola, esperando notificación nueva...")
-        dest = await _poll_notification_download(page, download_dir, baseline_hrefs, emit)
-        if dest:
-            return dest
-
-        emit(f"No se encontró descarga nueva en 5 min, reintentando...")
-
-    raise TimeoutError(f"Export no disponible después de {max_export_attempts} intentos")
+    await asyncio.sleep(2)
+    emit("Export de Correos disparado")
 
 
-async def _get_notification_hrefs(page, emit) -> set[str]:
-    """Open notification panel and collect all 'here' link hrefs."""
-    bell = page.locator('xpath=/html/body/div[1]/div[1]/div[2]/div/div/div[2]/div[3]')
+async def _open_notification_panel(page):
+    """Open the notification panel using multiple strategies."""
+    # Strategy 1: Look for bell icon by common selectors
+    bell_selectors = [
+        '[data-test-id="notification-bell"]',
+        '[aria-label*="otification"]',
+        'svg[data-testid*="bell"]',
+        'svg[data-testid*="notification"]',
+    ]
+    for sel in bell_selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.click(timeout=3000)
+                return True
+        except Exception:
+            continue
+
+    # Strategy 2: Find the bell by its position (top-right area, usually an SVG or icon)
+    # The bell is typically in the top nav bar, near the right side
     try:
-        await bell.click(timeout=5000)
+        # Look for any clickable element in the notification area that contains a badge or SVG
+        notif_area = page.locator('header >> svg, nav >> svg, [class*="notification"], [class*="bell"]').first
+        if await notif_area.count() > 0:
+            await notif_area.click(timeout=3000)
+            return True
     except Exception:
         pass
-    await asyncio.sleep(2)
 
-    hrefs = await page.evaluate("""() => {
-        const links = document.querySelectorAll('a');
-        const result = [];
-        for (const link of links) {
-            const txt = link.textContent.trim().toLowerCase();
-            if ((txt === 'here' || txt === 'here.') && link.offsetWidth > 0) {
-                result.push(link.href);
-            }
-        }
-        return result;
-    }""")
-
-    # Close panel
-    await page.keyboard.press("Escape")
-    await asyncio.sleep(0.5)
-    await page.mouse.click(500, 400)
-
-    return set(hrefs)
+    # Strategy 3: Click by coordinates (top-right area where bell typically is)
+    try:
+        await page.mouse.click(1870, 30)
+        return True
+    except Exception:
+        return False
 
 
-async def _poll_notification_download(
-    page, download_dir: Path, baseline_hrefs: set[str], emit
-) -> Path | None:
+async def _poll_both_downloads(
+    page, page2, download_dir: Path, emit,
+    need_people: bool = True,
+    max_wait: int = 600, poll_interval: int = 5, max_retries: int = 5,
+) -> tuple[Path | None, Path]:
     """
-    Poll the Notification center for a NEW download link (one not in baseline_hrefs).
-    Returns Path if download succeeded, None if timed out.
+    Poll notification center for People and/or Email Activity downloads.
+
+    Uses Playwright locators directly to find and click download links
+    in the notification panel.
+
+    Returns: (people_csv_path_or_None, email_activity_csv_path)
     """
-    max_wait = 300  # 5 min
-    poll_interval = 5
-
-    bell = page.locator('xpath=/html/body/div[1]/div[1]/div[2]/div/div/div[2]/div[3]')
-
+    people_csv = None
+    email_csv = None
+    people_retries = 0
+    email_retries = 0
+    consecutive_empty_polls = 0
     start = datetime.now()
     poll = 0
 
     while (datetime.now() - start).total_seconds() < max_wait:
-        poll += 1
+        if (people_csv or not need_people) and email_csv:
+            break
 
-        # Click notification bell
-        try:
-            await bell.click(timeout=5000)
-        except Exception:
-            pass
+        poll += 1
+        current_interval = min(poll_interval + (poll // 10) * 2, 15)
+
+        # Open notification panel
+        await _open_notification_panel(page)
         await asyncio.sleep(2)
 
-        # Get all current "here" links
-        current_hrefs = await page.evaluate("""() => {
-            const links = document.querySelectorAll('a');
-            const result = [];
-            for (const link of links) {
-                const txt = link.textContent.trim().toLowerCase();
-                if ((txt === 'here' || txt === 'here.') && link.offsetWidth > 0) {
-                    result.push(link.href);
-                }
-            }
-            return result;
-        }""")
-
         elapsed = int((datetime.now() - start).total_seconds())
-        new_hrefs = [h for h in current_hrefs if h not in baseline_hrefs]
 
-        if poll % 6 == 0 or new_hrefs:
-            emit(f"Poll {poll} ({elapsed}s) — {len(current_hrefs)} links totales, {len(new_hrefs)} nuevos")
+        # ── Check for People CSV notification ──
+        if need_people and not people_csv:
+            try:
+                # "Contacts export completed. Download." — click the "Download" link
+                people_link = page.locator('text=Contacts export completed').locator('..').locator('..').locator('a:visible').first
+                if await people_link.count() == 0:
+                    # Try broader: any link near "export completed"
+                    people_link = page.locator('a:has-text("Download"):visible').first
+                if await people_link.count() > 0:
+                    emit(f"Descarga de Personas lista! ({elapsed}s)")
+                    try:
+                        people_csv = await _click_download_link(page, people_link, download_dir / "people.csv", emit)
+                    except Exception as e:
+                        emit(f"Error descargando People CSV: {e}")
+            except Exception:
+                pass
 
-        if new_hrefs:
-            target_href = new_hrefs[0]
-            emit(f"Nuevo link detectado! Descargando...")
+            # Check for failure
+            try:
+                failed = page.locator('text=Failed to export contacts').first
+                if await failed.count() > 0 and not people_csv:
+                    people_retries += 1
+                    if people_retries <= max_retries:
+                        delay = 5 * (2 ** (people_retries - 1)) + random.uniform(0, 5)
+                        emit(f"Export de Personas falló, reintentando ({people_retries}/{max_retries}) en {delay:.0f}s...")
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(delay)
+                        try:
+                            await _trigger_people_export(page, download_dir, emit)
+                        except Exception as e:
+                            emit(f"Error re-disparando People export: {e}")
+                        continue
+                    else:
+                        emit(f"Export de Personas falló {max_retries} veces, continuando sin People CSV")
+                        need_people = False
+            except Exception:
+                pass
 
-            here_link = page.locator(f'a[href="{target_href}"]:visible').first
-            if await here_link.count() == 0:
-                here_link = page.locator('a:has-text("here"):visible').first
+        # ── Check for Email Activity CSV notification ──
+        if not email_csv:
+            try:
+                # "Download your contact-specific stats here." — click "here" link
+                email_link = page.locator('text=contact-specific stats').locator('..').locator('a:visible').first
+                if await email_link.count() == 0:
+                    email_link = page.locator('a:has-text("here"):near(:text("contact-specific stats"))').first
+                if await email_link.count() == 0:
+                    # Broader: look for "here" link that's visible in the notification area
+                    email_link = page.locator('text=contact-specific stats').locator('..').locator('..').locator('a:visible').first
+                if await email_link.count() > 0:
+                    emit(f"Descarga de Correos lista! ({elapsed}s)")
+                    try:
+                        email_csv = await _click_download_link(page, email_link, download_dir / "email_activity.csv", emit)
+                    except Exception as e:
+                        emit(f"Error descargando Email CSV: {e}")
+            except Exception:
+                pass
 
+            # Check for email failure
+            try:
+                failed_email = page.locator('text=/Failed to export(?!.*contacts)/').first
+                if await failed_email.count() > 0 and not email_csv:
+                    email_retries += 1
+                    if email_retries <= max_retries:
+                        delay = 5 * (2 ** (email_retries - 1)) + random.uniform(0, 5)
+                        emit(f"Export de Correos falló, reintentando ({email_retries}/{max_retries}) en {delay:.0f}s...")
+                        await page.keyboard.press("Escape")
+                        await asyncio.sleep(delay)
+                        try:
+                            await _trigger_email_export(page2, emit)
+                        except Exception as e:
+                            emit(f"Error re-disparando Email export: {e}")
+                        continue
+                    else:
+                        emit(f"Export de Correos falló {max_retries} veces")
+            except Exception:
+                pass
+
+        # Track empty polls
+        if not people_csv and not email_csv:
+            consecutive_empty_polls += 1
+        else:
+            consecutive_empty_polls = 0
+
+        if (people_csv or not need_people) and email_csv:
+            break
+
+        # Status update every ~30s
+        if poll % 6 == 0:
+            pending = []
+            if need_people and not people_csv:
+                pending.append(f"Personas (retries: {people_retries})")
+            if not email_csv:
+                pending.append(f"Correos (retries: {email_retries})")
+            emit(f"Poll {poll} ({elapsed}s) — esperando: {', '.join(pending)}")
+
+        # If stuck, try refreshing
+        if consecutive_empty_polls >= 20 and consecutive_empty_polls % 20 == 0:
+            emit(f"[poll] {consecutive_empty_polls} polls vacíos, recargando página...")
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=15_000)
+                await asyncio.sleep(3)
+            except Exception:
+                pass
+
+        # Close panel before next poll
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+        try:
+            await page.mouse.click(500, 400)
+        except Exception:
+            pass
+
+        await asyncio.sleep(current_interval)
+
+    if need_people and not people_csv:
+        raise TimeoutError(f"People CSV no disponible después de {max_wait}s ({people_retries} reintentos)")
+    if not email_csv:
+        raise TimeoutError(f"Email Activity CSV no disponible después de {max_wait}s ({email_retries} reintentos)")
+
+    return people_csv, email_csv
+
+
+async def _click_download_link(page, link_locator, dest: Path, emit=None) -> Path:
+    """Click a download link locator and save the file. Retries up to 3 times."""
+    last_error = None
+    for attempt in range(1, 4):
+        try:
             async with page.expect_download(timeout=60_000) as download_info:
-                await here_link.click()
+                await link_locator.click()
 
             download = await download_info.value
-            dest = download_dir / "email_activity.csv"
             await download.save_as(str(dest))
+            size = dest.stat().st_size
+            msg = f"[scraper] {dest.name} descargado: {size:,} bytes"
+            if emit:
+                emit(msg)
+            else:
+                print(msg)
+            if size == 0:
+                raise ValueError(f"{dest.name} está vacío (0 bytes)")
             return dest
-
-        # Close notification panel before next poll
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.5)
-        await page.mouse.click(500, 400)
-
-        await asyncio.sleep(poll_interval)
-
-    return None
+        except Exception as e:
+            last_error = e
+            msg = f"[download] Intento {attempt}/3 falló para {dest.name}: {e}"
+            if emit:
+                emit(msg)
+            else:
+                print(msg)
+            if attempt < 3:
+                await asyncio.sleep(3 + random.uniform(0, 2))
+    raise last_error
