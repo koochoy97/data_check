@@ -361,7 +361,8 @@
   },
   "siete_-_servicio": {
     "display_name": "Siete - Servicio",
-    "team_id": 327997
+    "team_id": 327997,
+    "excluded": true
   },
   "meriti": {
     "display_name": "Meriti",

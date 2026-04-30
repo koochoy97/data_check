@@ -12,6 +12,7 @@ from app.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_TOKEN_PATH
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 
 
@@ -56,7 +57,7 @@ def authorize_interactive():
         )
 
     flow = InstalledAppFlow.from_client_config(_client_config(), SCOPES)
-    creds = flow.run_local_server(port=0)
+    creds = flow.run_local_server(port=8080)
 
     token_path = Path(GOOGLE_TOKEN_PATH)
     token_path.parent.mkdir(parents=True, exist_ok=True)

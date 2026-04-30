@@ -17,6 +17,7 @@ export default function App() {
   const [files, setFiles] = useState([])
   const [error, setError] = useState(null)
   const [syncing, setSyncing] = useState(false)
+  const [bulkLimit, setBulkLimit] = useState(3)
   const logEndRef = useRef(null)
 
   function loadClients() {
@@ -97,6 +98,47 @@ export default function App() {
     }
   }
 
+  function handleGenerateBulk() {
+    if (running) return
+    setRunning(true)
+    setLogs([])
+    setSheetUrl(null)
+    setFiles([])
+    setError(null)
+
+    const es = new EventSource(`${API}/generate-bulk?limit=${bulkLimit}`)
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data.type === 'progress') {
+          setLogs(prev => [...prev, data.message])
+        } else if (data.type === 'file') {
+          setFiles(prev => [...prev, { name: data.name, size: data.size, path: data.path }])
+        } else if (data.type === 'done') {
+          setLogs(prev => [...prev, data.message])
+          setRunning(false)
+          es.close()
+        } else if (data.type === 'error') {
+          setError(data.message)
+          setRunning(false)
+          es.close()
+        }
+      } catch (e) {
+        console.error('SSE parse error:', e, event.data)
+      }
+    }
+
+    es.onerror = (e) => {
+      console.error('SSE error:', e)
+      if (running) {
+        setError('Conexion perdida con el servidor')
+        setRunning(false)
+      }
+      es.close()
+    }
+  }
+
   return (
     <div style={styles.container}>
       <h1 style={styles.title}>Reply.io Report Validator</h1>
@@ -138,6 +180,30 @@ export default function App() {
         >
           {running ? 'Generando...' : 'Generar Reporte'}
         </button>
+
+        <div style={styles.bulkRow}>
+          <label style={{ ...styles.label, marginBottom: 0, marginRight: 8 }}>Cantidad</label>
+          <input
+            type="number"
+            min={1}
+            max={clients.length || 1}
+            value={bulkLimit}
+            onChange={e => setBulkLimit(Math.max(1, parseInt(e.target.value) || 1))}
+            disabled={running || syncing}
+            style={styles.bulkInput}
+          />
+          <button
+            onClick={handleGenerateBulk}
+            disabled={running || syncing}
+            style={{
+              ...styles.bulkButton,
+              opacity: (running || syncing) ? 0.6 : 1,
+              cursor: running ? 'wait' : 'pointer',
+            }}
+          >
+            {running ? 'Procesando...' : `Consolidar ${bulkLimit} clientes`}
+          </button>
+        </div>
       </div>
 
       {logs.length > 0 && (
@@ -240,6 +306,31 @@ const styles = {
     fontWeight: 600,
     color: '#fff',
     background: '#2563eb',
+    border: 'none',
+    borderRadius: 6,
+    cursor: 'pointer',
+  },
+  bulkRow: {
+    display: 'flex',
+    alignItems: 'center',
+    marginTop: 12,
+    gap: 8,
+  },
+  bulkInput: {
+    width: 70,
+    padding: '8px 10px',
+    fontSize: 14,
+    border: '1px solid #d0d0d0',
+    borderRadius: 6,
+    outline: 'none',
+  },
+  bulkButton: {
+    flex: 1,
+    padding: '10px',
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#fff',
+    background: '#7c3aed',
     border: 'none',
     borderRadius: 6,
     cursor: 'pointer',

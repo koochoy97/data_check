@@ -23,6 +23,7 @@ if GOOGLE_REFRESH_TOKEN and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
         "scopes": [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/gmail.send",
         ],
         "universe_domain": "googleapis.com",
         "account": "",
