@@ -35,14 +35,14 @@ def consolidate(
 
         people_csv = entry.get("people_csv")
         if people_csv and Path(people_csv).exists():
-            df = pd.read_csv(people_csv)
+            df = pd.read_csv(people_csv, low_memory=False)
             df.insert(0, "client_id", cid)
             df.insert(1, "client_name", cname)
             people_frames.append(df)
 
         email_csv = entry.get("email_csv")
         if email_csv and Path(email_csv).exists():
-            df = pd.read_csv(email_csv)
+            df = pd.read_csv(email_csv, low_memory=False)
             df.insert(0, "client_id", cid)
             df.insert(1, "client_name", cname)
             email_frames.append(df)

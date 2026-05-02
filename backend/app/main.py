@@ -163,8 +163,11 @@ async def _run_bulk_pipeline(emit, client_ids: list[str], clients: dict):
         emit({"type": "progress", "message": "Enviando por email..."})
         try:
             send_consolidated_report(consolidated)
-            emit({"type": "progress", "message": f"Email enviado a {', '.join(['jaime@wearesiete.com', 'nicolas@wearesiete.com'])}"})
+            emit({"type": "progress", "message": "Email enviado a jaime@wearesiete.com, nicolas@wearesiete.com"})
+            print("[email] Enviado correctamente")
         except Exception as e:
+            traceback.print_exc()
+            print(f"[email] ERROR: {e}")
             emit({"type": "progress", "message": f"Error enviando email: {e}"})
 
     return per_client_files, failures, consolidated
@@ -372,6 +375,29 @@ async def generate_bulk(limit: int = 0):
         await task
 
     return EventSourceResponse(event_generator())
+
+
+@app.post("/api/send-today")
+async def send_today():
+    """Busca los CSVs consolidados de hoy y los envía por email."""
+    today = datetime.now(PERU_UTC_OFFSET).date().isoformat()
+    consolidated_dir = DOWNLOAD_DIR / "consolidated"
+
+    found = {}
+    for kind, prefix in [("people", "people_consolidated"), ("email_activity", "email_activity_consolidated")]:
+        path = consolidated_dir / f"{prefix}_{today}.csv"
+        if path.exists():
+            found[kind] = path
+
+    if not found:
+        return {"error": f"No hay archivos consolidados para hoy ({today}) en {consolidated_dir}"}
+
+    try:
+        send_consolidated_report(found)
+        return {"sent": True, "files": [p.name for p in found.values()], "date": today}
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
 
 
 @app.post("/api/sync-clients")
