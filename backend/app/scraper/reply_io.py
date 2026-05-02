@@ -171,6 +171,110 @@ async def fetch_workspaces(
         return []
 
 
+async def download_all_reports(
+    email: str,
+    password: str,
+    clients: list[dict],
+    on_progress=None,
+    headless: bool = True,
+) -> dict[str, dict]:
+    """
+    Single login, iterates through all clients reusing the same browser session.
+    Each client only does a workspace switch, no new login.
+
+    Args:
+        clients: [{"client_id": str, "team_id": int, "download_dir": Path}, ...]
+
+    Returns:
+        {client_id: {"personas": Path, "correos": Path}} for successes,
+        {client_id: {"error": str}} for failures.
+    """
+
+    def emit(msg: str):
+        if on_progress:
+            on_progress(msg)
+        print(msg)
+
+    results: dict[str, dict] = {}
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            accept_downloads=True,
+        )
+        page = await context.new_page()
+        page2 = await context.new_page()
+
+        # ── LOGIN ONCE ──
+        emit("Iniciando sesión en Reply.io...")
+        await page.goto("https://run.reply.io/", wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(3)
+
+        if "oauth" in page.url or "login" in page.url.lower():
+            await page.locator("input:visible").first.fill(email)
+            await page.locator('input[type="password"]:visible').fill(password)
+            await page.get_by_role("button", name="Sign in").click()
+            try:
+                await page.wait_for_url("**/run.reply.io/**", timeout=20_000)
+            except Exception:
+                pass
+        await asyncio.sleep(3)
+        emit(f"Sesión iniciada. Procesando {len(clients)} clientes...")
+
+        # ── LOOP CLIENTS ──
+        for idx, client in enumerate(clients, 1):
+            cid = client["client_id"]
+            team_id = client["team_id"]
+            download_dir = Path(client["download_dir"])
+            download_dir.mkdir(parents=True, exist_ok=True)
+
+            def emit_client(msg, _cid=cid, _idx=idx):
+                emit(f"[{_idx}/{len(clients)}] {_cid}: {msg}")
+
+            try:
+                emit_client(f"Cambiando a workspace {team_id}...")
+                await page.goto(
+                    f"https://run.reply.io/Home/SwitchTeam?teamId={team_id}",
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
+                )
+                await asyncio.sleep(8)
+
+                emit_client("Disparando export de Personas...")
+                people_direct = await _retry(
+                    lambda: _trigger_people_export(page, download_dir, emit_client),
+                    max_attempts=3, base_delay=5, emit=emit_client, label="trigger People export",
+                )
+
+                emit_client("Disparando export de Correos...")
+                await _retry(
+                    lambda: _trigger_email_export(page2, emit_client),
+                    max_attempts=3, base_delay=5, emit=emit_client, label="trigger Email export",
+                )
+
+                need_people = people_direct is None
+                emit_client(f"Esperando descargas (people={need_people}, correos=True)...")
+                people_notif, email_csv = await _poll_both_downloads(
+                    page, page2, download_dir, emit_client, need_people=need_people,
+                )
+
+                people_csv = people_direct or people_notif
+                results[cid] = {"personas": people_csv, "correos": email_csv}
+                emit_client("OK")
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                emit_client(f"ERROR: {e}")
+                results[cid] = {"error": str(e)}
+
+        await page2.close()
+        await browser.close()
+
+    return results
+
+
 async def download_reports(
     email: str,
     password: str,

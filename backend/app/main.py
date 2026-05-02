@@ -16,7 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, CLIENTS_CONFIG_PATH
 from app.processing.consolidator import consolidate
 from app.processing.send_email import send_consolidated_report
-from app.scraper.reply_io import download_reports, fetch_workspaces
+from app.scraper.reply_io import download_all_reports, download_reports, fetch_workspaces
 
 
 MAX_FILE_AGE_HOURS = 24
@@ -108,6 +108,7 @@ async def _daily_sync_cron():
 async def _run_bulk_pipeline(emit, client_ids: list[str], clients: dict):
     """
     Download + consolidate reports for the given client_ids.
+    Uses a single browser session (one login) for all clients.
     `emit` is a callable that receives dicts with keys: type, message, [name, size, path].
     Returns (per_client_files, failures, consolidated).
     """
@@ -115,39 +116,39 @@ async def _run_bulk_pipeline(emit, client_ids: list[str], clients: dict):
     per_client_files: list[dict] = []
     failures: list[str] = []
 
-    for idx, cid in enumerate(client_ids, 1):
-        client = clients[cid]
-        team_id = client["team_id"]
-        display_name = client.get("display_name", cid)
-        email = client.get("reply_io_email", REPLY_IO_EMAIL)
-        password = client.get("reply_io_password", REPLY_IO_PASSWORD)
+    # Build client list for the single-session scraper
+    scraper_clients = [
+        {
+            "client_id": cid,
+            "team_id": clients[cid]["team_id"],
+            "download_dir": DOWNLOAD_DIR / cid,
+        }
+        for cid in client_ids
+    ]
 
-        emit({"type": "progress", "message": f"[{idx}/{len(client_ids)}] {display_name} — iniciando descarga"})
+    def on_progress(msg):
+        emit({"type": "progress", "message": msg})
 
-        def on_progress(msg, _name=display_name):
-            emit({"type": "progress", "message": f"  {_name}: {msg}"})
+    results = await download_all_reports(
+        email=REPLY_IO_EMAIL,
+        password=REPLY_IO_PASSWORD,
+        clients=scraper_clients,
+        on_progress=on_progress,
+        headless=headless,
+    )
 
-        download_dir = DOWNLOAD_DIR / cid
-        try:
-            reports = await download_reports(
-                email=email,
-                password=password,
-                team_id=team_id,
-                download_dir=download_dir,
-                on_progress=on_progress,
-                headless=headless,
-            )
+    for cid in client_ids:
+        display_name = clients[cid].get("display_name", cid)
+        result = results.get(cid, {"error": "sin resultado"})
+        if "error" in result:
+            failures.append(f"{display_name}: {result['error']}")
+        else:
             per_client_files.append({
                 "client_id": cid,
                 "client_name": display_name,
-                "people_csv": reports.get("personas"),
-                "email_csv": reports.get("correos"),
+                "people_csv": result.get("personas"),
+                "email_csv": result.get("correos"),
             })
-            emit({"type": "progress", "message": f"[{idx}/{len(client_ids)}] {display_name} — OK"})
-        except Exception as e:
-            traceback.print_exc()
-            failures.append(f"{display_name}: {e}")
-            emit({"type": "progress", "message": f"[{idx}/{len(client_ids)}] {display_name} — ERROR: {e}"})
 
     consolidated = {}
     if per_client_files:
