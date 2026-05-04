@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -419,8 +419,19 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 if STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
+    # Extensions that are never SPA routes — return 404 immediately
+    _BLOCKED_EXTENSIONS = {
+        ".env", ".json", ".xml", ".php", ".sql", ".bak", ".cfg",
+        ".yaml", ".yml", ".ini", ".log", ".sh", ".py",
+    }
+
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        # Block obvious credential/config probes
+        suffix = Path(full_path).suffix.lower()
+        if suffix in _BLOCKED_EXTENSIONS or full_path.startswith("."):
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+
         file_path = STATIC_DIR / full_path
         if full_path and file_path.exists() and file_path.is_file():
             return FileResponse(file_path)

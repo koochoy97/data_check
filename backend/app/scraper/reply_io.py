@@ -5,6 +5,14 @@ from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+# Required for running Chromium inside Docker (avoids /dev/shm crashes)
+CHROMIUM_ARGS = [
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-setuid-sandbox",
+]
+
 
 async def _retry(coro_fn, max_attempts=3, base_delay=5, emit=None, label="operación"):
     """Retry an async operation with exponential backoff + jitter."""
@@ -42,7 +50,7 @@ async def fetch_workspaces(
     Returns: [{"team_id": 123, "name": "Workspace Name"}, ...]
     """
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(headless=headless, args=CHROMIUM_ARGS)
         context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
 
@@ -198,7 +206,7 @@ async def download_all_reports(
     results: dict[str, dict] = {}
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(headless=headless, args=CHROMIUM_ARGS)
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080},
             accept_downloads=True,
@@ -302,7 +310,7 @@ async def download_reports(
     download_dir.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless, slow_mo=200 if not headless else 0)
+        browser = await p.chromium.launch(headless=headless, slow_mo=200 if not headless else 0, args=CHROMIUM_ARGS)
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080},
             accept_downloads=True,
