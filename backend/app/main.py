@@ -17,6 +17,7 @@ from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD
 from app.processing.consolidator import consolidate
 from app.processing.send_email import send_consolidated_report
 from app.scraper.reply_io import download_all_reports, download_reports, fetch_workspaces
+from app.siete_api import fetch_active_clients
 
 
 MAX_FILE_AGE_HOURS = 24
@@ -105,25 +106,23 @@ async def _daily_sync_cron():
 
 # ── Bulk pipeline ─────────────────────────────────────────────────────────────
 
-async def _run_bulk_pipeline(emit, client_ids: list[str], clients: dict):
+async def _run_bulk_pipeline(emit, clients: list[dict]):
     """
-    Download + consolidate reports for the given client_ids.
+    Download + consolidate reports for the given clients.
+    `clients` is a list of {"client_id", "client_name", "team_id"}.
     Uses a single browser session (one login) for all clients.
-    `emit` is a callable that receives dicts with keys: type, message, [name, size, path].
-    Returns (per_client_files, failures, consolidated).
     """
     headless = os.getenv("HEADLESS", "true").lower() != "false"
     per_client_files: list[dict] = []
     failures: list[str] = []
 
-    # Build client list for the single-session scraper
     scraper_clients = [
         {
-            "client_id": cid,
-            "team_id": clients[cid]["team_id"],
-            "download_dir": DOWNLOAD_DIR / cid,
+            "client_id": c["client_id"],
+            "team_id": c["team_id"],
+            "download_dir": DOWNLOAD_DIR / c["client_id"],
         }
-        for cid in client_ids
+        for c in clients
     ]
 
     def on_progress(msg):
@@ -137,8 +136,9 @@ async def _run_bulk_pipeline(emit, client_ids: list[str], clients: dict):
         headless=headless,
     )
 
-    for cid in client_ids:
-        display_name = clients[cid].get("display_name", cid)
+    for c in clients:
+        cid = c["client_id"]
+        display_name = c["client_name"]
         result = results.get(cid, {"error": "sin resultado"})
         if "error" in result:
             failures.append(f"{display_name}: {result['error']}")
@@ -187,20 +187,16 @@ async def _daily_bulk_cron():
         await asyncio.sleep(wait_seconds)
 
         try:
-            clients = load_active_clients()
-            client_ids = list(clients.keys())
-            print(f"[bulk-cron] Iniciando descarga de {len(client_ids)} clientes activos")
-
-            messages = []
+            clients = await fetch_active_clients()
+            print(f"[bulk-cron] Iniciando descarga de {len(clients)} clientes activos (Siete API)")
 
             def emit(msg):
-                messages.append(msg)
                 if msg.get("type") == "progress":
                     print(f"[bulk-cron] {msg['message']}")
 
-            per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, client_ids, clients)
+            per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, clients)
 
-            print(f"[bulk-cron] Completado: {len(per_client_files)}/{len(client_ids)} clientes OK, "
+            print(f"[bulk-cron] Completado: {len(per_client_files)}/{len(clients)} clientes OK, "
                   f"{len(failures)} fallidos, {len(consolidated)} archivos consolidados")
             if failures:
                 print(f"[bulk-cron] Fallidos: {failures}")
@@ -333,28 +329,27 @@ async def generate_bulk(limit: int = 0):
 
     async def run_pipeline():
         try:
-            clients = load_active_clients()
-            client_ids = list(clients.keys())
+            clients = await fetch_active_clients()
             if limit > 0:
-                client_ids = client_ids[:limit]
-            if not client_ids:
-                await queue.put({"type": "error", "message": "No hay clientes activos configurados"})
+                clients = clients[:limit]
+            if not clients:
+                await queue.put({"type": "error", "message": "No hay clientes activos en Siete API"})
                 return
 
             await queue.put({"type": "progress",
-                             "message": f"Procesando {len(client_ids)} clientes activos"})
+                             "message": f"Procesando {len(clients)} clientes activos (Siete API)"})
 
             def emit(msg):
                 queue.put_nowait(msg)
 
-            per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, client_ids, clients)
+            per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, clients)
 
             if not per_client_files:
                 await queue.put({"type": "error",
                                  "message": f"Ningún cliente OK. Errores: {failures}"})
                 return
 
-            done_msg = f"Listo. {len(per_client_files)}/{len(client_ids)} clientes consolidados."
+            done_msg = f"Listo. {len(per_client_files)}/{len(clients)} clientes consolidados."
             if failures:
                 done_msg += f" Fallidos ({len(failures)}): {', '.join(f.split(':')[0] for f in failures)}"
             await queue.put({"type": "done", "message": done_msg})
