@@ -179,6 +179,27 @@ async def fetch_workspaces(
         return []
 
 
+# Reciclar las páginas cada N clientes para evitar acumulación de memoria en Chromium
+PAGE_RECYCLE_INTERVAL = 10
+
+
+async def _login_reply_io(page, email: str, password: str, emit) -> None:
+    """Realiza login en Reply.io en la página dada."""
+    emit("Iniciando sesión en Reply.io...")
+    await page.goto("https://run.reply.io/", wait_until="domcontentloaded", timeout=30_000)
+    await asyncio.sleep(3)
+
+    if "oauth" in page.url or "login" in page.url.lower():
+        await page.locator("input:visible").first.fill(email)
+        await page.locator('input[type="password"]:visible').fill(password)
+        await page.get_by_role("button", name="Sign in").click()
+        try:
+            await page.wait_for_url("**/run.reply.io/**", timeout=20_000)
+        except Exception:
+            pass
+    await asyncio.sleep(3)
+
+
 async def download_all_reports(
     email: str,
     password: str,
@@ -188,10 +209,8 @@ async def download_all_reports(
 ) -> dict[str, dict]:
     """
     Single login, iterates through all clients reusing the same browser session.
-    Each client only does a workspace switch, no new login.
-
-    Args:
-        clients: [{"client_id": str, "team_id": int, "download_dir": Path}, ...]
+    Pages are recycled every PAGE_RECYCLE_INTERVAL clients to prevent memory leaks.
+    The browser context (cookies/session) is preserved across recycles.
 
     Returns:
         {client_id: {"personas": Path, "correos": Path}} for successes,
@@ -215,20 +234,21 @@ async def download_all_reports(
         page2 = await context.new_page()
 
         # ── LOGIN ONCE ──
-        emit("Iniciando sesión en Reply.io...")
-        await page.goto("https://run.reply.io/", wait_until="domcontentloaded", timeout=30_000)
-        await asyncio.sleep(3)
-
-        if "oauth" in page.url or "login" in page.url.lower():
-            await page.locator("input:visible").first.fill(email)
-            await page.locator('input[type="password"]:visible').fill(password)
-            await page.get_by_role("button", name="Sign in").click()
-            try:
-                await page.wait_for_url("**/run.reply.io/**", timeout=20_000)
-            except Exception:
-                pass
-        await asyncio.sleep(3)
+        await _login_reply_io(page, email, password, emit)
         emit(f"Sesión iniciada. Procesando {len(clients)} clientes...")
+
+        async def recycle_pages(reason: str):
+            """Cierra y recrea las páginas (mantiene cookies del context)."""
+            nonlocal page, page2
+            emit(f"[recycle] Reciclando páginas ({reason})...")
+            for p_obj in (page, page2):
+                try:
+                    await p_obj.close()
+                except Exception:
+                    pass
+            page = await context.new_page()
+            page2 = await context.new_page()
+            await asyncio.sleep(2)
 
         # ── LOOP CLIENTS ──
         for idx, client in enumerate(clients, 1):
@@ -240,44 +260,73 @@ async def download_all_reports(
             def emit_client(msg, _cid=cid, _idx=idx):
                 emit(f"[{_idx}/{len(clients)}] {_cid}: {msg}")
 
-            try:
-                emit_client(f"Cambiando a workspace {team_id}...")
-                await page.goto(
-                    f"https://run.reply.io/Home/SwitchTeam?teamId={team_id}",
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
-                )
-                await asyncio.sleep(8)
+            # Reciclar proactivamente cada N clientes
+            if idx > 1 and (idx - 1) % PAGE_RECYCLE_INTERVAL == 0:
+                await recycle_pages(f"cada {PAGE_RECYCLE_INTERVAL} clientes")
 
-                emit_client("Disparando export de Personas...")
-                people_direct = await _retry(
-                    lambda: _trigger_people_export(page, download_dir, emit_client),
-                    max_attempts=3, base_delay=5, emit=emit_client, label="trigger People export",
-                )
+            # Reintentar el cliente entero hasta 2 veces si crashea la página
+            client_attempts = 0
+            max_client_attempts = 2
+            while client_attempts < max_client_attempts:
+                client_attempts += 1
+                try:
+                    emit_client(f"Cambiando a workspace {team_id}...")
+                    await page.goto(
+                        f"https://run.reply.io/Home/SwitchTeam?teamId={team_id}",
+                        wait_until="domcontentloaded",
+                        timeout=30_000,
+                    )
+                    await asyncio.sleep(8)
 
-                emit_client("Disparando export de Correos...")
-                await _retry(
-                    lambda: _trigger_email_export(page2, emit_client),
-                    max_attempts=3, base_delay=5, emit=emit_client, label="trigger Email export",
-                )
+                    emit_client("Disparando export de Personas...")
+                    people_direct = await _retry(
+                        lambda: _trigger_people_export(page, download_dir, emit_client),
+                        max_attempts=3, base_delay=5, emit=emit_client, label="trigger People export",
+                    )
 
-                need_people = people_direct is None
-                emit_client(f"Esperando descargas (people={need_people}, correos=True)...")
-                people_notif, email_csv = await _poll_both_downloads(
-                    page, page2, download_dir, emit_client, need_people=need_people,
-                )
+                    emit_client("Disparando export de Correos...")
+                    await _retry(
+                        lambda: _trigger_email_export(page2, emit_client),
+                        max_attempts=3, base_delay=5, emit=emit_client, label="trigger Email export",
+                    )
 
-                people_csv = people_direct or people_notif
-                results[cid] = {"personas": people_csv, "correos": email_csv}
-                emit_client("OK")
+                    need_people = people_direct is None
+                    emit_client(f"Esperando descargas (people={need_people}, correos=True)...")
+                    people_notif, email_csv = await _poll_both_downloads(
+                        page, page2, download_dir, emit_client, need_people=need_people,
+                    )
 
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                emit_client(f"ERROR: {e}")
-                results[cid] = {"error": str(e)}
+                    people_csv = people_direct or people_notif
+                    results[cid] = {"personas": people_csv, "correos": email_csv}
+                    emit_client("OK")
+                    break
 
-        await page2.close()
+                except Exception as e:
+                    err_str = str(e)
+                    is_crash = "Page crashed" in err_str or "Target closed" in err_str or "Target page" in err_str
+
+                    if is_crash and client_attempts < max_client_attempts:
+                        emit_client(f"Página crasheada, reciclando y reintentando: {err_str[:100]}")
+                        try:
+                            await recycle_pages("crash recovery")
+                        except Exception as recycle_err:
+                            emit_client(f"Falló recycle, reiniciando login: {recycle_err}")
+                            try:
+                                await _login_reply_io(page, email, password, emit_client)
+                            except Exception:
+                                pass
+                        continue
+
+                    import traceback
+                    traceback.print_exc()
+                    emit_client(f"ERROR: {err_str[:200]}")
+                    results[cid] = {"error": err_str}
+                    break
+
+        try:
+            await page2.close()
+        except Exception:
+            pass
         await browser.close()
 
     return results
