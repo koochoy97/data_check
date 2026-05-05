@@ -1,11 +1,13 @@
 """Envía los CSVs consolidados por Gmail API."""
 import base64
+import time
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from app.google_auth import get_credentials
 
@@ -44,7 +46,15 @@ def send_consolidated_report(consolidated: dict[str, Path]) -> None:
         msg.attach(attachment)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    for attempt in range(3):
+        try:
+            service.users().messages().send(userId="me", body={"raw": raw}).execute()
+            return
+        except HttpError as e:
+            if e.resp.status in (500, 503) and attempt < 2:
+                time.sleep(10 * (attempt + 1))
+                continue
+            raise
 
 
 def _date_from_consolidated(consolidated: dict[str, Path]) -> str:
