@@ -373,6 +373,26 @@ async def generate_bulk(limit: int = 0):
     return EventSourceResponse(event_generator())
 
 
+@app.get("/api/test-email")
+async def test_email():
+    """Envía un email de prueba sin adjuntos a jaime@wearesiete.com."""
+    import base64
+    from email.mime.text import MIMEText
+    from googleapiclient.discovery import build
+    from app.google_auth import get_credentials
+    try:
+        creds = get_credentials()
+        service = build("gmail", "v1", credentials=creds)
+        msg = MIMEText("Test de envío desde data-check. Si ves esto, Gmail funciona.")
+        msg["To"] = "jaime@wearesiete.com"
+        msg["Subject"] = "Test email data-check"
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        result = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return {"sent": True, "message_id": result.get("id")}
+    except Exception as e:
+        return {"sent": False, "error": str(e)}
+
+
 @app.post("/api/send-today")
 async def send_today():
     """Busca los CSVs consolidados de hoy y los envía por email."""
