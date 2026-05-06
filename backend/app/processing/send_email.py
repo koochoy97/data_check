@@ -46,13 +46,17 @@ def send_consolidated_report(consolidated: dict[str, Path]) -> None:
         msg.attach(attachment)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    print(f"[email] Tamaño del mensaje: {len(raw) / 1024 / 1024:.1f} MB")
     for attempt in range(3):
         try:
             service.users().messages().send(userId="me", body={"raw": raw}).execute()
             return
         except HttpError as e:
-            if e.resp.status in (500, 503) and attempt < 2:
-                time.sleep(10 * (attempt + 1))
+            print(f"[email] Intento {attempt+1}/3 falló: status={e.resp.status} reason={e.reason} details={e.error_details}")
+            if e.resp.status in (500, 503, 429) and attempt < 2:
+                wait = 30 * (attempt + 1)
+                print(f"[email] Esperando {wait}s antes de reintentar...")
+                time.sleep(wait)
                 continue
             raise
 
