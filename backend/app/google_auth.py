@@ -30,21 +30,31 @@ def _client_config() -> dict:
 
 
 def get_credentials() -> Credentials:
-    """Load or refresh OAuth2 credentials. Raises if not authorized yet."""
+    """Load and ensure OAuth2 credentials have a fresh access token."""
     token_path = Path(GOOGLE_TOKEN_PATH)
     creds = None
 
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
 
-    if creds and creds.expired and creds.refresh_token:
+    if not creds:
+        raise RuntimeError(
+            f"No hay token en {token_path}. Verificá GOOGLE_REFRESH_TOKEN/CLIENT_ID/SECRET en el entorno."
+        )
+
+    if not creds.refresh_token:
+        raise RuntimeError("Token sin refresh_token. Re-autorizar con `python -m app.google_setup`.")
+
+    # Forzar refresh si: token vacío, expirado, o no es válido por cualquier motivo
+    needs_refresh = not creds.token or creds.expired or not creds.valid
+    if needs_refresh:
+        print(f"[auth] Refrescando access token (token_empty={not creds.token}, expired={creds.expired})")
         creds.refresh(Request())
         token_path.write_text(creds.to_json())
+        print("[auth] Access token refrescado correctamente")
 
-    if not creds or not creds.valid:
-        raise RuntimeError(
-            "Google OAuth no autorizado. Corre 'python -m app.google_setup' primero."
-        )
+    if not creds.valid:
+        raise RuntimeError("Credenciales inválidas después del refresh.")
 
     return creds
 
