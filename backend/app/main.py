@@ -16,6 +16,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, CLIENTS_CONFIG_PATH
 from app.processing.consolidator import consolidate
 from app.processing.send_email import send_consolidated_report
+from app.processing.send_slack import send_consolidated_slack
 from app.scraper.reply_io import download_all_reports, download_reports, fetch_workspaces
 from app.siete_api import fetch_active_clients
 
@@ -170,6 +171,15 @@ async def _run_bulk_pipeline(emit, clients: list[dict]):
             traceback.print_exc()
             print(f"[email] ERROR: {e}")
             emit({"type": "progress", "message": f"Error enviando email: {e}"})
+
+        emit({"type": "progress", "message": "Enviando a Slack..."})
+        try:
+            send_consolidated_slack(consolidated)
+            emit({"type": "progress", "message": "Mensaje enviado a Slack"})
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[slack] ERROR: {e}")
+            emit({"type": "progress", "message": f"Error enviando a Slack: {e}"})
 
     return per_client_files, failures, consolidated
 
@@ -410,10 +420,23 @@ async def send_today():
 
     try:
         send_consolidated_report(found)
-        return {"sent": True, "files": [p.name for p in found.values()], "date": today}
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
+
+    slack_error = None
+    try:
+        send_consolidated_slack(found)
+    except Exception as e:
+        traceback.print_exc()
+        slack_error = str(e)
+
+    return {
+        "sent": True,
+        "files": [p.name for p in found.values()],
+        "date": today,
+        "slack_error": slack_error,
+    }
 
 
 @app.post("/api/sync-clients")

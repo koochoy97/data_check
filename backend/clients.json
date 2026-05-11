@@ -403,5 +403,53 @@
   "udem": {
     "display_name": "UDEM",
     "team_id": 328004
+  },
+  "muta": {
+    "display_name": "Muta",
+    "team_id": 474105
+  },
+  "ginia": {
+    "display_name": "Ginia",
+    "team_id": 474110
+  },
+  "base_labs": {
+    "display_name": "Base Labs",
+    "team_id": 474305
+  },
+  "asasul": {
+    "display_name": "Asasul",
+    "team_id": 475246
+  },
+  "izei_docu": {
+    "display_name": "Izei Docu",
+    "team_id": 475477
+  },
+  "naranja_media": {
+    "display_name": "Naranja Media",
+    "team_id": 477578
+  },
+  "people": {
+    "display_name": "People",
+    "team_id": 477761
+  },
+  "jobbint": {
+    "display_name": "Jobbint",
+    "team_id": 478700
+  },
+  "hiring_room": {
+    "display_name": "Hiring room",
+    "team_id": 478821
+  },
+  "mova": {
+    "display_name": "Mova",
+    "team_id": 479156
+  },
+  "finnegans": {
+    "display_name": "Finnegans",
+    "team_id": 479406
+  },
+  "solver": {
+    "display_name": "Solver",
+    "team_id": 483371
   }
 }
