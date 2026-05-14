@@ -15,7 +15,6 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, CLIENTS_CONFIG_PATH
 from app.processing.consolidator import consolidate
-from app.processing.send_email import send_consolidated_report
 from app.processing.send_slack import send_consolidated_slack
 from app.scraper.reply_io import download_all_reports, download_reports, fetch_workspaces
 from app.siete_api import fetch_active_clients
@@ -161,16 +160,6 @@ async def _run_bulk_pipeline(emit, clients: list[dict]):
         for path in consolidated.values():
             emit({"type": "file", "name": path.name, "size": path.stat().st_size,
                   "path": f"/api/consolidated/{path.name}"})
-
-        emit({"type": "progress", "message": "Enviando por email..."})
-        try:
-            send_consolidated_report(consolidated)
-            emit({"type": "progress", "message": "Email enviado a jaime@wearesiete.com, nicolas@wearesiete.com"})
-            print("[email] Enviado correctamente")
-        except Exception as e:
-            traceback.print_exc()
-            print(f"[email] ERROR: {e}")
-            emit({"type": "progress", "message": f"Error enviando email: {e}"})
 
         emit({"type": "progress", "message": "Enviando a Slack..."})
         try:
@@ -383,29 +372,56 @@ async def generate_bulk(limit: int = 0):
     return EventSourceResponse(event_generator())
 
 
-@app.get("/api/test-email")
-async def test_email():
-    """Envía un email de prueba sin adjuntos a jaime@wearesiete.com."""
-    import base64
-    from email.mime.text import MIMEText
-    from googleapiclient.discovery import build
-    from app.google_auth import get_credentials
+@app.get("/api/test-slack")
+def test_slack():
+    """Diagnóstico: reporta qué env vars de Slack están seteadas y manda un mensaje de prueba."""
+    from app.config import SLACK_BOT_TOKEN, SLACK_CHANNEL, SLACK_DESTINATIONS
+    from app.processing.send_slack import _parse_destinations, _resolve_destination, _post_with_retry
+    import httpx
+
+    report: dict = {
+        "SLACK_BOT_TOKEN_set": bool(SLACK_BOT_TOKEN),
+        "SLACK_BOT_TOKEN_prefix": (SLACK_BOT_TOKEN or "")[:5] + "..." if SLACK_BOT_TOKEN else None,
+        "SLACK_CHANNEL_set": bool(SLACK_CHANNEL),
+        "SLACK_DESTINATIONS_set": bool(SLACK_DESTINATIONS),
+        "parsed_destinations": _parse_destinations(),
+    }
+    if not SLACK_BOT_TOKEN:
+        report["auth_test"] = "skipped: no SLACK_BOT_TOKEN"
+        return report
+
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+               "Content-Type": "application/json; charset=utf-8"}
     try:
-        creds = get_credentials()
-        service = build("gmail", "v1", credentials=creds)
-        msg = MIMEText("Test de envío desde data-check. Si ves esto, Gmail funciona.")
-        msg["To"] = "jaime@wearesiete.com"
-        msg["Subject"] = "Test email data-check"
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        result = service.users().messages().send(userId="me", body={"raw": raw}).execute()
-        return {"sent": True, "message_id": result.get("id")}
+        r = httpx.post("https://slack.com/api/auth.test", headers=headers, timeout=15)
+        data = r.json()
+        report["auth_test"] = {"ok": data.get("ok"), "team": data.get("team"),
+                                "user": data.get("user"), "error": data.get("error")}
     except Exception as e:
-        return {"sent": False, "error": str(e)}
+        report["auth_test"] = {"error": str(e)}
+
+    if not report["parsed_destinations"]:
+        report["test_send"] = "skipped: no destinations"
+        return report
+
+    send_results = []
+    for raw in report["parsed_destinations"]:
+        ch = _resolve_destination(raw, headers)
+        if not ch:
+            send_results.append({"dest": raw, "status": "could_not_resolve"})
+            continue
+        try:
+            _post_with_retry(ch, "[test-slack] ping desde data-check", headers, label=raw)
+            send_results.append({"dest": raw, "channel": ch, "status": "sent"})
+        except Exception as e:
+            send_results.append({"dest": raw, "channel": ch, "status": "failed", "error": str(e)})
+    report["test_send"] = send_results
+    return report
 
 
 @app.post("/api/send-today")
 async def send_today():
-    """Busca los CSVs consolidados de hoy y los envía por email."""
+    """Busca los CSVs consolidados de hoy y los envía a Slack."""
     today = datetime.now(PERU_UTC_OFFSET).date().isoformat()
     consolidated_dir = DOWNLOAD_DIR / "consolidated"
 
@@ -419,23 +435,20 @@ async def send_today():
         return {"error": f"No hay archivos consolidados para hoy ({today}) en {consolidated_dir}"}
 
     try:
-        send_consolidated_report(found)
-    except Exception as e:
-        traceback.print_exc()
-        return {"error": str(e)}
-
-    slack_error = None
-    try:
         send_consolidated_slack(found)
     except Exception as e:
         traceback.print_exc()
-        slack_error = str(e)
+        return {
+            "sent": False,
+            "files": [p.name for p in found.values()],
+            "date": today,
+            "slack_error": str(e),
+        }
 
     return {
         "sent": True,
         "files": [p.name for p in found.values()],
         "date": today,
-        "slack_error": slack_error,
     }
 
 
