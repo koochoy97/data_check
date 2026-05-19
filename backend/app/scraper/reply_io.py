@@ -218,9 +218,12 @@ async def download_all_reports(
     """
 
     def emit(msg: str):
+        # If a callback is provided, defer printing to the caller (avoids duplicate log lines
+        # when the wrapper also prefixes/echoes). Otherwise print directly.
         if on_progress:
             on_progress(msg)
-        print(msg)
+        else:
+            print(msg)
 
     results: dict[str, dict] = {}
 
@@ -354,7 +357,8 @@ async def download_reports(
     def emit(msg: str):
         if on_progress:
             on_progress(msg)
-        print(msg)
+        else:
+            print(msg)
 
     download_dir.mkdir(parents=True, exist_ok=True)
 
@@ -491,11 +495,28 @@ async def _trigger_email_export(page, emit):
             break
         except Exception:
             await asyncio.sleep(2)
+    await asyncio.sleep(2)  # extra time for drawer animation on heavy workspaces
+
+    # Wait for the Date filter to be visible (heavy workspaces can take >10s to render),
+    # then scroll it into view before clicking. Avoids "element is not visible" timeouts
+    # on workspaces with many filters where Date is initially off-screen.
+    date_loc = page.locator("text=Date").first
+    try:
+        await date_loc.wait_for(state="visible", timeout=30_000)
+        await date_loc.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        # If wait/scroll fails, fall through to a regular click and let _retry handle it
+        pass
+    await date_loc.click(timeout=30_000)
     await asyncio.sleep(1)
 
-    await page.locator("text=Date").first.click(timeout=10_000)
-    await asyncio.sleep(1)
-    await page.locator("text=Last Year").first.click(timeout=10_000)
+    last_year_loc = page.locator("text=Last Year").first
+    try:
+        await last_year_loc.wait_for(state="visible", timeout=15_000)
+        await last_year_loc.scroll_into_view_if_needed(timeout=5_000)
+    except Exception:
+        pass
+    await last_year_loc.click(timeout=15_000)
     await asyncio.sleep(1)
     await page.locator('button:has-text("Apply")').click(timeout=10_000)
     await asyncio.sleep(5)
