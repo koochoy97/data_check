@@ -37,14 +37,5 @@ if GOOGLE_REFRESH_TOKEN and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
     Path(GOOGLE_TOKEN_PATH).parent.mkdir(parents=True, exist_ok=True)
     Path(GOOGLE_TOKEN_PATH).write_text(json.dumps(token_data))
     print("[config] Token reconstruido desde env vars individuales")
-CLIENTS_CONFIG_PATH = os.getenv("CLIENTS_CONFIG_PATH", "clients.json")
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "/tmp/reports"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def load_clients() -> dict:
-    path = Path(CLIENTS_CONFIG_PATH)
-    if not path.exists():
-        return {}
-    with open(path) as f:
-        return json.load(f)

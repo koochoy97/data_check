@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import ReconciliationPage from './ReconciliationPage'
 
 const API = '/api'
 
@@ -9,6 +10,16 @@ function formatBytes(bytes) {
 }
 
 export default function App() {
+  // Simple path-based routing: /reconciliation renders the reconciliation page,
+  // anything else renders the main report generator.
+  const path = typeof window !== 'undefined' ? window.location.pathname : '/'
+  if (path === '/reconciliation' || path === '/reconciliation/') {
+    return <ReconciliationPage />
+  }
+  return <HomePage />
+}
+
+function HomePage() {
   const [clients, setClients] = useState([])
   const [selected, setSelected] = useState('')
   const [logs, setLogs] = useState([])
@@ -16,7 +27,6 @@ export default function App() {
   const [sheetUrl, setSheetUrl] = useState(null)
   const [files, setFiles] = useState([])
   const [error, setError] = useState(null)
-  const [syncing, setSyncing] = useState(false)
   const [bulkLimit, setBulkLimit] = useState(3)
   const logEndRef = useRef(null)
 
@@ -31,25 +41,6 @@ export default function App() {
   }
 
   useEffect(() => { loadClients() }, [])
-
-  function handleSyncWorkspaces() {
-    setSyncing(true)
-    setError(null)
-    fetch(`${API}/sync-clients`, { method: 'POST' })
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) {
-          setError(data.error)
-        } else {
-          loadClients()
-        }
-        setSyncing(false)
-      })
-      .catch(() => {
-        setError('Error sincronizando workspaces')
-        setSyncing(false)
-      })
-  }
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -146,22 +137,12 @@ export default function App() {
       <div style={styles.card}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
           <label style={{ ...styles.label, marginBottom: 0 }}>Cliente</label>
-          <button
-            onClick={handleSyncWorkspaces}
-            disabled={syncing || running}
-            style={{
-              ...styles.syncButton,
-              opacity: syncing ? 0.6 : 1,
-              cursor: syncing ? 'wait' : 'pointer',
-            }}
-          >
-            {syncing ? 'Sincronizando...' : 'Actualizar Workspaces'}
-          </button>
+          <a href="/reconciliation" style={styles.linkAction}>Reconciliación →</a>
         </div>
         <select
           value={selected}
           onChange={e => setSelected(e.target.value)}
-          disabled={running || syncing}
+          disabled={running}
           style={styles.select}
         >
           {clients.map(c => (
@@ -171,10 +152,10 @@ export default function App() {
 
         <button
           onClick={handleGenerate}
-          disabled={running || syncing || !selected}
+          disabled={running || !selected}
           style={{
             ...styles.button,
-            opacity: (running || syncing) ? 0.6 : 1,
+            opacity: running ? 0.6 : 1,
             cursor: running ? 'wait' : 'pointer',
           }}
         >
@@ -189,15 +170,15 @@ export default function App() {
             max={clients.length || 1}
             value={bulkLimit}
             onChange={e => setBulkLimit(Math.max(1, parseInt(e.target.value) || 1))}
-            disabled={running || syncing}
+            disabled={running}
             style={styles.bulkInput}
           />
           <button
             onClick={handleGenerateBulk}
-            disabled={running || syncing}
+            disabled={running}
             style={{
               ...styles.bulkButton,
-              opacity: (running || syncing) ? 0.6 : 1,
+              opacity: running ? 0.6 : 1,
               cursor: running ? 'wait' : 'pointer',
             }}
           >
@@ -335,11 +316,11 @@ const styles = {
     borderRadius: 6,
     cursor: 'pointer',
   },
-  syncButton: {
-    padding: '6px 12px',
+  linkAction: {
     fontSize: 12,
-    fontWeight: 500,
     color: '#2563eb',
+    textDecoration: 'none',
+    padding: '6px 10px',
     background: '#eff6ff',
     border: '1px solid #bfdbfe',
     borderRadius: 6,

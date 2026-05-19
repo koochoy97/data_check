@@ -1,33 +1,45 @@
-"""FastAPI backend with SSE for Reply.io report validation"""
+"""FastAPI backend with SSE for Reply.io report validation.
+
+Source of truth: Siete API (`/core/clientes/`).
+Clients are listed and updated exclusively through Siete API; no local JSON cache.
+Reports are delivered via Slack only (no Gmail). Reconciliation of clients
+without team_id happens via the `/reconciliation` UI.
+"""
 import asyncio
 import json
 import os
 import traceback
 from contextlib import asynccontextmanager
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from app.config import load_clients, REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, CLIENTS_CONFIG_PATH
+from app.config import REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, PUBLIC_BASE_URL
+from app.cron_report import CronRunReport, load_last_cron_run
 from app.processing.consolidator import consolidate
-from app.processing.send_slack import send_consolidated_slack
-from app.scraper.reply_io import download_all_reports, download_reports, fetch_workspaces
-from app.siete_api import fetch_active_clients
-
+from app.processing.send_slack import (
+    send_consolidated_slack,
+    send_reconciliation_alert,
+    send_siete_down_alert,
+)
+from app.scraper.reply_io import download_all_reports, download_reports
+from app.reconciliation import (
+    build_pending_payload,
+    fetch_reply_workspaces_live,
+)
+from app.siete_api import (
+    fetch_active_clients,
+    fetch_active_missing_team_id,
+    patch_team_id,
+)
+from app.utils.dates import PERU_UTC_OFFSET, today_peru_iso
 
 MAX_FILE_AGE_HOURS = 24
-# Peru is UTC-5, no DST
-PERU_UTC_OFFSET = timezone(timedelta(hours=-5))
-
-
-def load_active_clients() -> dict:
-    """Return clients that don't have excluded=true."""
-    return {k: v for k, v in load_clients().items() if not v.get("excluded")}
 
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
@@ -58,50 +70,6 @@ async def _cleanup_cron():
         except Exception as e:
             print(f"[cleanup] Error: {e}")
         await asyncio.sleep(3600)
-
-
-# ── Workspace sync ────────────────────────────────────────────────────────────
-
-async def _sync_workspaces():
-    """Scrape Reply.io workspaces and update clients.json. Returns updated dict or None."""
-    headless = os.getenv("HEADLESS", "true").lower() != "false"
-    workspaces = await fetch_workspaces(
-        email=REPLY_IO_EMAIL,
-        password=REPLY_IO_PASSWORD,
-        headless=headless,
-    )
-    if not workspaces:
-        return None
-
-    clients = load_clients()
-    for ws in workspaces:
-        key = ws["name"].lower().replace(" ", "_")
-        if key not in clients:
-            clients[key] = {"display_name": ws["name"], "team_id": ws["team_id"]}
-        else:
-            clients[key]["team_id"] = ws["team_id"]
-            clients[key]["display_name"] = ws["name"]
-
-    with open(CLIENTS_CONFIG_PATH, "w") as f:
-        json.dump(clients, f, indent=2, ensure_ascii=False)
-
-    return clients
-
-
-async def _daily_sync_cron():
-    """Sync workspaces every day at 00:00 local time."""
-    while True:
-        now = datetime.now()
-        midnight = datetime.combine(now.date(), time(0, 0)) + timedelta(days=1)
-        wait_seconds = (midnight - now).total_seconds()
-        print(f"[sync-cron] Próximo sync en {wait_seconds:.0f}s ({midnight})")
-        await asyncio.sleep(wait_seconds)
-        try:
-            print("[sync-cron] Ejecutando sync de workspaces...")
-            result = await _sync_workspaces()
-            print(f"[sync-cron] {'Sync exitoso: ' + str(len(result)) + ' clientes' if result else 'Sync falló: no se encontraron workspaces'}")
-        except Exception as e:
-            print(f"[sync-cron] Error: {e}")
 
 
 # ── Bulk pipeline ─────────────────────────────────────────────────────────────
@@ -184,24 +152,75 @@ async def _daily_bulk_cron():
         wait_seconds = (next_run - now_utc).total_seconds()
         print(f"[bulk-cron] Próxima descarga masiva en {wait_seconds:.0f}s ({next_run.astimezone(PERU_UTC_OFFSET)} hora Perú)")
         await asyncio.sleep(wait_seconds)
+        await _run_daily_cron_once()
 
-        try:
-            clients = await fetch_active_clients()
-            print(f"[bulk-cron] Iniciando descarga de {len(clients)} clientes activos (Siete API)")
 
-            def emit(msg):
-                if msg.get("type") == "progress":
-                    print(f"[bulk-cron] {msg['message']}")
+async def _run_daily_cron_once() -> CronRunReport:
+    """Ejecuta una vez el bulk-cron y guarda el reporte. Reusable para tests/diagnóstico."""
+    report = CronRunReport.start()
 
-            per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, clients)
+    # Paso 1: obtener clientes activos. Si Siete API está caída, alertar y abortar.
+    try:
+        clients = await fetch_active_clients()
+    except Exception as e:
+        traceback.print_exc()
+        err = f"{type(e).__name__}: {e}"
+        print(f"[bulk-cron] Error fatal al consultar Siete API: {err}")
+        send_siete_down_alert(err, endpoint="/core/clientes/")
+        report.finish(error="siete_api_down")
+        report.error = err
+        report.save()
+        return report
 
-            print(f"[bulk-cron] Completado: {len(per_client_files)}/{len(clients)} clientes OK, "
-                  f"{len(failures)} fallidos, {len(consolidated)} archivos consolidados")
-            if failures:
-                print(f"[bulk-cron] Fallidos: {failures}")
-        except Exception as e:
-            traceback.print_exc()
-            print(f"[bulk-cron] Error fatal: {e}")
+    # Paso 2: recolectar pendientes de reconciliación (no aborta, sigue con los que sí tienen team_id)
+    try:
+        pending = await fetch_active_missing_team_id()
+    except Exception as e:
+        print(f"[bulk-cron] Warning: no se pudo obtener pendientes de reconciliación: {e}")
+        pending = []
+
+    report.clients_total = len(clients)
+    report.reconciliation = {
+        "missing_team_id": [
+            {"siete_id": p["siete_id"], "siete_name": p["siete_name"], "siete_slug": p["siete_slug"]}
+            for p in pending
+        ]
+    }
+
+    print(f"[bulk-cron] Iniciando descarga de {len(clients)} clientes activos "
+          f"({len(pending)} pendientes de reconciliación)")
+
+    def emit(msg):
+        if msg.get("type") == "progress":
+            print(f"[bulk-cron] {msg['message']}")
+
+    try:
+        per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, clients)
+    except Exception as e:
+        traceback.print_exc()
+        report.finish(error=f"pipeline_error: {e}")
+        report.save()
+        return report
+
+    report.clients_processed = len(per_client_files)
+    report.failures = [
+        {"slug": f.split(":", 1)[0].strip(), "error": f.split(":", 1)[1].strip() if ":" in f else ""}
+        for f in failures
+    ]
+    report.slack_delivery = {"consolidated": list(consolidated.keys())}
+
+    print(f"[bulk-cron] Completado: {len(per_client_files)}/{len(clients)} clientes OK, "
+          f"{len(failures)} fallidos, {len(consolidated)} archivos consolidados")
+    if failures:
+        print(f"[bulk-cron] Fallidos: {failures}")
+
+    # Paso 3: alerta de reconciliación si hay pendientes
+    if pending:
+        send_reconciliation_alert(pending_count=len(pending), base_url=PUBLIC_BASE_URL)
+
+    report.finish()
+    report.save()
+    return report
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -209,7 +228,6 @@ async def _daily_bulk_cron():
 @asynccontextmanager
 async def lifespan(app):
     tasks = [
-        asyncio.create_task(_daily_sync_cron()),
         asyncio.create_task(_cleanup_cron()),
         asyncio.create_task(_daily_bulk_cron()),
     ]
@@ -231,32 +249,32 @@ app.add_middleware(
 
 
 @app.get("/api/clients")
-def list_clients():
-    clients = load_clients()
+async def list_clients():
+    """Lista de clientes Active con team_id desde Siete API."""
+    clients = await fetch_active_clients()
     return [
-        {"id": k, "name": v.get("display_name", k), "team_id": v["team_id"],
-         "excluded": v.get("excluded", False)}
-        for k, v in clients.items()
+        {"id": c["client_id"], "name": c["client_name"], "team_id": c["team_id"],
+         "siete_id": c["siete_id"]}
+        for c in clients
     ]
 
 
 @app.get("/api/generate/{client_id}")
 async def generate_report(client_id: str):
-    """SSE: download reports for a single client."""
+    """SSE: download reports for a single client (by slug)."""
     queue: asyncio.Queue = asyncio.Queue()
 
     async def run_pipeline():
         try:
-            clients = load_clients()
-            if client_id not in clients:
-                await queue.put({"type": "error", "message": f"Cliente '{client_id}' no encontrado"})
+            clients = await fetch_active_clients()
+            client = next((c for c in clients if c["client_id"] == client_id), None)
+            if not client:
+                await queue.put({"type": "error",
+                                 "message": f"Cliente '{client_id}' no encontrado o sin team_id en Siete"})
                 return
 
-            client = clients[client_id]
             team_id = client["team_id"]
-            display_name = client.get("display_name", client_id)
-            email = client.get("reply_io_email", REPLY_IO_EMAIL)
-            password = client.get("reply_io_password", REPLY_IO_PASSWORD)
+            display_name = client["client_name"]
 
             def on_progress(msg):
                 queue.put_nowait({"type": "progress", "message": msg})
@@ -265,7 +283,7 @@ async def generate_report(client_id: str):
             download_dir = DOWNLOAD_DIR / client_id
             headless = os.getenv("HEADLESS", "true").lower() != "false"
             reports = await download_reports(
-                email=email, password=password, team_id=team_id,
+                email=REPLY_IO_EMAIL, password=REPLY_IO_PASSWORD, team_id=team_id,
                 download_dir=download_dir, on_progress=on_progress, headless=headless,
             )
 
@@ -304,21 +322,26 @@ async def generate_report(client_id: str):
 def download_file(client_id: str, filename: str):
     allowed = {"people.csv", "email_activity.csv"}
     if filename not in allowed:
-        return {"error": "File not found"}
+        raise HTTPException(status_code=404, detail="File not found")
     path = DOWNLOAD_DIR / client_id / filename
     if not path.exists():
-        return {"error": "File not found"}
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path, filename=filename, media_type="text/csv")
 
 
 @app.get("/api/consolidated/{filename}")
 def download_consolidated(filename: str):
     if "/" in filename or ".." in filename or not filename.endswith(".csv"):
-        return {"error": "Invalid filename"}
+        raise HTTPException(status_code=400, detail="Invalid filename")
     path = DOWNLOAD_DIR / "consolidated" / filename
     if not path.exists():
-        return {"error": "File not found"}
-    return FileResponse(path, filename=filename, media_type="text/csv")
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        path,
+        filename=filename,
+        media_type="text/csv",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/generate-bulk")
@@ -421,8 +444,8 @@ def test_slack():
 
 @app.post("/api/send-today")
 async def send_today():
-    """Busca los CSVs consolidados de hoy y los envía a Slack."""
-    today = datetime.now(PERU_UTC_OFFSET).date().isoformat()
+    """Busca los CSVs consolidados de hoy (Perú) y los envía a Slack."""
+    today = today_peru_iso()
     consolidated_dir = DOWNLOAD_DIR / "consolidated"
 
     found = {}
@@ -452,12 +475,115 @@ async def send_today():
     }
 
 
+@app.get("/api/diagnostics")
+async def diagnostics():
+    """Diagnóstico del pipeline: env vars, Siete API, CSVs de hoy, último cron run."""
+    from app.config import (
+        SLACK_BOT_TOKEN, SLACK_CHANNEL, SLACK_DESTINATIONS,
+        SIETE_API_KEY, REPLY_IO_EMAIL, REPLY_IO_PASSWORD,
+    )
+    from app.siete_api import _fetch_all_clientes
+
+    env_state = {
+        "SLACK_BOT_TOKEN": bool(SLACK_BOT_TOKEN),
+        "SLACK_DESTINATIONS": bool(SLACK_DESTINATIONS),
+        "SLACK_CHANNEL": bool(SLACK_CHANNEL),
+        "SIETE_API_KEY": bool(SIETE_API_KEY),
+        "REPLY_IO_EMAIL": bool(REPLY_IO_EMAIL),
+        "REPLY_IO_PASSWORD": bool(REPLY_IO_PASSWORD),
+        "PUBLIC_BASE_URL": PUBLIC_BASE_URL,
+    }
+
+    # Siete API health
+    siete_state: dict = {"reachable": False}
+    try:
+        data = await _fetch_all_clientes()
+        siete_state["reachable"] = True
+        siete_state["total"] = len(data)
+        by_status: dict[str, int] = {}
+        active_with_team = 0
+        active_missing: list[dict] = []
+        for c in data:
+            st = c.get("status") or "None"
+            by_status[st] = by_status.get(st, 0) + 1
+            if c.get("status") == "Active":
+                if c.get("team_id"):
+                    active_with_team += 1
+                else:
+                    active_missing.append({"siete_id": c["id"], "siete_name": c["cliente"]})
+        siete_state["by_status"] = by_status
+        siete_state["active_with_team_id"] = active_with_team
+        siete_state["active_missing_team_id"] = active_missing
+    except Exception as e:
+        siete_state["error"] = f"{type(e).__name__}: {e}"
+
+    # Consolidated CSVs of today (Peru)
+    today = today_peru_iso()
+    consolidated_dir = DOWNLOAD_DIR / "consolidated"
+    consolidated_today: dict[str, dict] = {}
+    for kind, prefix in [("people", "people_consolidated"),
+                         ("email_activity", "email_activity_consolidated")]:
+        path = consolidated_dir / f"{prefix}_{today}.csv"
+        if path.exists():
+            consolidated_today[kind] = {
+                "exists": True,
+                "size_mb": round(path.stat().st_size / 1024 / 1024, 2),
+                "name": path.name,
+            }
+        else:
+            consolidated_today[kind] = {"exists": False, "size_mb": None, "name": None}
+
+    return {
+        "today_peru": today,
+        "env": env_state,
+        "siete_api": siete_state,
+        "consolidated_today": consolidated_today,
+        "last_cron_run": load_last_cron_run(),
+    }
+
+
+@app.get("/api/reconciliation/pending")
+async def reconciliation_pending():
+    """Lista los clientes Active en Siete sin team_id + sugerencias de Reply.io."""
+    siete_pending = await fetch_active_missing_team_id()
+    if not siete_pending:
+        return {"pending": [], "reply_options": [], "scrape_error": None}
+    reply_workspaces = await fetch_reply_workspaces_live()  # None si falla
+    return build_pending_payload(siete_pending, reply_workspaces)
+
+
+@app.post("/api/reconciliation/save")
+async def reconciliation_save(items: list[dict]):
+    """Guarda los matches en Siete API vía PATCH.
+
+    Body: [{"siete_id": int, "team_id": int}, ...]
+    """
+    saved = []
+    errors = []
+    for item in items:
+        siete_id = item.get("siete_id")
+        team_id = item.get("team_id")
+        if not isinstance(siete_id, int) or not isinstance(team_id, int) or team_id <= 0:
+            errors.append({
+                "siete_id": siete_id,
+                "reason": f"invalid input: siete_id={siete_id!r}, team_id={team_id!r}",
+            })
+            continue
+        try:
+            updated = await patch_team_id(siete_id=siete_id, team_id=team_id)
+            saved.append({"siete_id": siete_id, "team_id": team_id, "client_name": updated.get("cliente")})
+        except Exception as e:
+            errors.append({"siete_id": siete_id, "reason": f"{type(e).__name__}: {e}"})
+    return {"saved": saved, "errors": errors}
+
+
 @app.post("/api/sync-clients")
-async def sync_clients():
-    clients = await _sync_workspaces()
-    if clients is None:
-        return {"error": "No se encontraron workspaces"}
-    return {"synced": len(clients), "clients": clients}
+async def sync_clients_gone():
+    """Legacy endpoint: clients.json was eliminated; Siete API is the source of truth."""
+    return JSONResponse(
+        status_code=410,
+        content={"error": "Removed: clients.json was eliminated. Use /reconciliation to add team_ids to Siete."},
+    )
 
 
 @app.get("/api/health")

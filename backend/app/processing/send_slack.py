@@ -128,3 +128,55 @@ def _date_from_consolidated(consolidated: dict[str, Path]) -> str:
         if parts:
             return parts[-1]
     return ""
+
+
+# ── Alertas operativas (canal #automations_notifications) ─────────────────────
+
+# Canal #automations_notifications. Override-able via env var por si cambia.
+import os
+_ALERTS_CHANNEL = os.getenv("SLACK_ALERTS_CHANNEL", "C093XM2UV9C")
+
+
+def _post_to_alerts(text: str) -> None:
+    """Manda un mensaje al canal de alertas. Best-effort, no levanta si falla."""
+    if not SLACK_BOT_TOKEN:
+        print(f"[slack-alert] SLACK_BOT_TOKEN no configurado, skip: {text[:80]}")
+        return
+    headers = {
+        "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    try:
+        _post_with_retry(_ALERTS_CHANNEL, text, headers, label=f"alerts/{_ALERTS_CHANNEL}")
+    except Exception as e:
+        # No relanzar: la alerta es best-effort y el caller no debería abortar por esto.
+        print(f"[slack-alert] No se pudo enviar alerta: {e}")
+
+
+def send_reconciliation_alert(pending_count: int, base_url: str) -> None:
+    """Avisa al canal de alertas que hay clientes pendientes de reconciliación.
+
+    No envía nada si pending_count == 0.
+    """
+    if pending_count <= 0:
+        return
+    url = f"{base_url.rstrip('/')}/reconciliation"
+    text = (
+        f"*⚠️ Reconciliación pendiente*\n"
+        f"{pending_count} cliente{'s' if pending_count != 1 else ''} Active en Siete sin `team_id`.\n"
+        f"Resolvé en {url}"
+    )
+    _post_to_alerts(text)
+
+
+def send_siete_down_alert(error: str, endpoint: str) -> None:
+    """Avisa al canal de alertas que el cron diario abortó por fallo de Siete API."""
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    text = (
+        f"*🚨 Cron diario abortado — Siete API caída*\n"
+        f"`endpoint:` {endpoint}\n"
+        f"`error:` {error}\n"
+        f"`timestamp:` {ts}"
+    )
+    _post_to_alerts(text)

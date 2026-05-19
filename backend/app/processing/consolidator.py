@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from app.utils.dates import today_peru
+
 
 def consolidate(
     per_client_files: list[dict],
@@ -18,12 +20,12 @@ def consolidate(
             - people_csv (Path | None)
             - email_csv (Path | None)
         output_dir: carpeta donde escribir los consolidados.
-        run_date: fecha para el sufijo del archivo. Default = hoy.
+        run_date: fecha para el sufijo del archivo. Default = hoy en Perú (UTC-5).
 
     Returns: {"people": Path, "email_activity": Path} (sólo claves con datos).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    run_date = run_date or date.today()
+    run_date = run_date or today_peru()
     suffix = run_date.isoformat()
 
     people_frames = []
