@@ -14,6 +14,122 @@ CHROMIUM_ARGS = [
 ]
 
 
+class WorkspaceUnavailable(Exception):
+    """El workspace de Reply.io no es accesible para la sesión actual.
+
+    Se levanta cuando `SwitchTeam` devuelve no-2xx (workspace eliminado o bot
+    desinvitado) o cuando la verificación post-switch detecta que el workspace
+    activo no coincide con el esperado. Es una falla persistente: no se reintenta.
+    """
+
+
+async def _switch_workspace(
+    page,
+    team_id: int,
+    emit,
+    alert_context: dict | None = None,
+) -> None:
+    """Cambia al workspace `team_id` y valida que el switch fue efectivo.
+
+    Levanta `WorkspaceUnavailable` si:
+      - Capa 1: la response del SwitchTeam es ausente o no-2xx (típicamente 403
+        cuando el bot no es miembro del workspace).
+      - Capa 2: tras el switch, `/Team/GetTeamData` devuelve un teamId distinto
+        al esperado.
+
+    Si `alert_context` es un dict con `client_name`/`siete_id`/`team_id`, al
+    detectarse la falla se emite una alerta a Slack (best-effort, no aborta).
+    """
+    url = f"https://run.reply.io/Home/SwitchTeam?teamId={team_id}"
+
+    # ── Capa 1: validar status code del SwitchTeam ────────────────────────────
+    resp = await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+
+    if resp is None:
+        reason = "SwitchTeam: no se obtuvo response del servidor"
+        _emit_workspace_alert(alert_context, reason, emit)
+        raise WorkspaceUnavailable(f"teamId={team_id}: {reason}")
+
+    if not resp.ok:
+        body_preview = ""
+        try:
+            body_preview = (await resp.text())[:200]
+        except Exception:
+            pass
+        reason = f"SwitchTeam HTTP {resp.status}: {body_preview}".strip()
+        _emit_workspace_alert(alert_context, reason, emit)
+        raise WorkspaceUnavailable(f"teamId={team_id}: {reason}")
+
+    # ── Capa 2: validar workspace activo vía /Team/GetTeamData ────────────────
+    await asyncio.sleep(3)  # gracia para que la sesión se asiente server-side
+
+    try:
+        active = await page.evaluate(
+            """async () => {
+                try {
+                    const r = await fetch('/Team/GetTeamData', {credentials: 'include'});
+                    if (!r.ok) return {__error: 'http_' + r.status};
+                    return await r.json();
+                } catch (e) {
+                    return {__error: String(e)};
+                }
+            }"""
+        )
+    except Exception as e:
+        emit(f"[switch] WARN: no pude consultar /Team/GetTeamData ({e}); confío en Capa 1")
+        await asyncio.sleep(5)
+        return
+
+    if not isinstance(active, dict) or "__error" in active:
+        err = active.get("__error", "respuesta no es dict") if isinstance(active, dict) else "respuesta no es dict"
+        emit(f"[switch] WARN: /Team/GetTeamData no disponible ({err}); confío en Capa 1")
+        await asyncio.sleep(5)
+        return
+
+    observed_raw = (
+        active.get("teamId")
+        or active.get("id")
+        or active.get("currentTeamId")
+    )
+    if observed_raw is None:
+        emit(f"[switch] WARN: /Team/GetTeamData no devolvió teamId/id/currentTeamId; confío en Capa 1")
+        await asyncio.sleep(5)
+        return
+
+    try:
+        observed = int(observed_raw)
+    except (TypeError, ValueError):
+        emit(f"[switch] WARN: teamId observado no es int ({observed_raw!r}); confío en Capa 1")
+        await asyncio.sleep(5)
+        return
+
+    if observed != int(team_id):
+        reason = (
+            f"workspace activo no coincide: esperado teamId={team_id}, "
+            f"sesión activa en teamId={observed}"
+        )
+        _emit_workspace_alert(alert_context, reason, emit)
+        raise WorkspaceUnavailable(f"teamId={team_id}: {reason}")
+
+    await asyncio.sleep(5)  # tiempo de gracia que ya teníamos antes del flujo
+
+
+def _emit_workspace_alert(alert_context: dict | None, reason: str, emit) -> None:
+    """Best-effort: dispara alerta Slack si hay contexto. Nunca propaga errores."""
+    if not alert_context:
+        return
+    try:
+        from app.processing.send_slack import send_workspace_unavailable_alert
+        send_workspace_unavailable_alert(
+            client_name=alert_context.get("client_name") or alert_context.get("client_id") or "?",
+            siete_id=alert_context.get("siete_id"),
+            team_id=alert_context.get("team_id"),
+            reason=reason,
+        )
+    except Exception as e:
+        emit(f"[switch] WARN: no se pudo emitir alerta Slack: {e}")
+
+
 async def _retry(coro_fn, max_attempts=3, base_delay=5, emit=None, label="operación"):
     """Retry an async operation with exponential backoff + jitter."""
     last_error = None
@@ -260,6 +376,13 @@ async def download_all_reports(
             download_dir = Path(client["download_dir"])
             download_dir.mkdir(parents=True, exist_ok=True)
 
+            alert_context = {
+                "client_id": cid,
+                "client_name": client.get("client_name") or cid,
+                "siete_id": client.get("siete_id"),
+                "team_id": team_id,
+            }
+
             def emit_client(msg, _cid=cid, _idx=idx):
                 emit(f"[{_idx}/{len(clients)}] {_cid}: {msg}")
 
@@ -274,12 +397,7 @@ async def download_all_reports(
                 client_attempts += 1
                 try:
                     emit_client(f"Cambiando a workspace {team_id}...")
-                    await page.goto(
-                        f"https://run.reply.io/Home/SwitchTeam?teamId={team_id}",
-                        wait_until="domcontentloaded",
-                        timeout=30_000,
-                    )
-                    await asyncio.sleep(8)
+                    await _switch_workspace(page, team_id, emit_client, alert_context=alert_context)
 
                     emit_client("Disparando export de Personas...")
                     people_direct = await _retry(
@@ -302,6 +420,13 @@ async def download_all_reports(
                     people_csv = people_direct or people_notif
                     results[cid] = {"personas": people_csv, "correos": email_csv}
                     emit_client("OK")
+                    break
+
+                except WorkspaceUnavailable as e:
+                    # Falla persistente del workspace (403, mismatch). No reintentar:
+                    # el siguiente cliente arranca con su propio switch limpio.
+                    emit_client(f"SKIP: {e}")
+                    results[cid] = {"error": str(e)}
                     break
 
                 except Exception as e:
@@ -387,12 +512,7 @@ async def download_reports(
 
         # ── SWITCH WORKSPACE ──
         emit(f"Cambiando a workspace {team_id}...")
-        await page.goto(
-            f"https://run.reply.io/Home/SwitchTeam?teamId={team_id}",
-            wait_until="domcontentloaded",
-            timeout=30_000,
-        )
-        await asyncio.sleep(8)
+        await _switch_workspace(page, team_id, emit, alert_context=None)
 
         # ── TRIGGER BOTH EXPORTS (parallel on two tabs) ──
         page2 = await context.new_page()

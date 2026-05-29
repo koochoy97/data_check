@@ -113,7 +113,7 @@ def _build_message(consolidated: dict[str, Path]) -> str:
     lines = [
         f"*Reportes consolidados de Reply.io del {date_str}*",
         "",
-        "Links de descarga (válidos por 24h):",
+        "Links de descarga (válidos por 48h):",
     ]
     for path in consolidated.values():
         size_mb = path.stat().st_size / 1024 / 1024
@@ -178,5 +178,29 @@ def send_siete_down_alert(error: str, endpoint: str) -> None:
         f"`endpoint:` {endpoint}\n"
         f"`error:` {error}\n"
         f"`timestamp:` {ts}"
+    )
+    _post_to_alerts(text)
+
+
+def send_workspace_unavailable_alert(
+    client_name: str,
+    siete_id: int | None,
+    team_id: int | None,
+    reason: str,
+) -> None:
+    """Avisa al canal de alertas que un workspace de Reply.io no es accesible.
+
+    Se dispara cuando el SwitchTeam devuelve no-2xx o la verificación post-switch
+    detecta que el workspace activo no coincide con el esperado. El cron sigue
+    procesando los demás clientes; este aviso es para que el operador resuelva
+    el acceso (churn del cliente o re-invitación del bot al workspace).
+    """
+    text = (
+        f"*⚠️ Workspace de Reply.io inaccesible*\n"
+        f"*Cliente:* {client_name}\n"
+        f"`siete_id:` {siete_id}\n"
+        f"`team_id:` {team_id}\n"
+        f"`motivo:` {reason}\n"
+        f"_Revisar si el cliente fue dado de baja o si hay que re-invitar al bot al workspace en Reply.io._"
     )
     _post_to_alerts(text)

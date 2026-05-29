@@ -39,7 +39,7 @@ from app.siete_api import (
 )
 from app.utils.dates import PERU_UTC_OFFSET, today_peru_iso
 
-MAX_FILE_AGE_HOURS = 24
+MAX_FILE_AGE_HOURS = 48
 
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
@@ -87,6 +87,8 @@ async def _run_bulk_pipeline(emit, clients: list[dict]):
     scraper_clients = [
         {
             "client_id": c["client_id"],
+            "client_name": c["client_name"],
+            "siete_id": c.get("siete_id"),
             "team_id": c["team_id"],
             "download_dir": DOWNLOAD_DIR / c["client_id"],
         }
