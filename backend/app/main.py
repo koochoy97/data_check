@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from app.config import REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, PUBLIC_BASE_URL
+from app import discarded_clients
 from app.cron_report import CronRunReport, load_last_cron_run
 from app.processing.consolidator import consolidate
 from app.processing.send_slack import (
@@ -29,14 +30,17 @@ from app.processing.send_slack import (
 )
 from app.scraper.reply_io import download_all_reports, download_reports
 from app.reconciliation import (
+    build_mapping_payload,
     build_pending_payload,
     fetch_reply_workspaces_live,
 )
 from app.siete_api import (
+    _fetch_all_clientes,
     fetch_active_clients,
     fetch_active_missing_team_id,
     patch_team_id,
 )
+from app.utils.slug import slug as _slug
 from app.utils.dates import PERU_UTC_OFFSET, today_peru_iso
 
 MAX_FILE_AGE_HOURS = 48
@@ -74,11 +78,13 @@ async def _cleanup_cron():
 
 # ── Bulk pipeline ─────────────────────────────────────────────────────────────
 
-async def _run_bulk_pipeline(emit, clients: list[dict]):
+async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
     """
     Download + consolidate reports for the given clients.
     `clients` is a list of {"client_id", "client_name", "team_id"}.
     Uses a single browser session (one login) for all clients.
+    `pending_count` se pasa al mensaje de Slack para mostrar el aviso de
+    reconciliación pendiente cuando hay clientes a resolver.
     """
     headless = os.getenv("HEADLESS", "true").lower() != "false"
     per_client_files: list[dict] = []
@@ -133,7 +139,7 @@ async def _run_bulk_pipeline(emit, clients: list[dict]):
 
         emit({"type": "progress", "message": "Enviando a Slack..."})
         try:
-            send_consolidated_slack(consolidated)
+            send_consolidated_slack(consolidated, pending_count=pending_count)
             emit({"type": "progress", "message": "Mensaje enviado a Slack"})
         except Exception as e:
             traceback.print_exc()
@@ -181,6 +187,10 @@ async def _run_daily_cron_once() -> CronRunReport:
         print(f"[bulk-cron] Warning: no se pudo obtener pendientes de reconciliación: {e}")
         pending = []
 
+    # Filtrar los descartados localmente para que no cuenten ni se muestren al operador.
+    discarded = discarded_clients.load()
+    pending = [p for p in pending if p["siete_id"] not in discarded]
+
     report.clients_total = len(clients)
     report.reconciliation = {
         "missing_team_id": [
@@ -197,7 +207,9 @@ async def _run_daily_cron_once() -> CronRunReport:
             print(f"[bulk-cron] {msg['message']}")
 
     try:
-        per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, clients)
+        per_client_files, failures, consolidated = await _run_bulk_pipeline(
+            emit, clients, pending_count=len(pending),
+        )
     except Exception as e:
         traceback.print_exc()
         report.finish(error=f"pipeline_error: {e}")
@@ -363,10 +375,21 @@ async def generate_bulk(limit: int = 0):
             await queue.put({"type": "progress",
                              "message": f"Procesando {len(clients)} clientes activos (Siete API)"})
 
+            # Pendientes para el aviso en el mensaje de Slack (filtrando descartados localmente)
+            try:
+                pending = await fetch_active_missing_team_id()
+                discarded = discarded_clients.load()
+                pending_count = sum(1 for p in pending if p["siete_id"] not in discarded)
+            except Exception as e:
+                print(f"[generate-bulk] Warning pendientes: {e}")
+                pending_count = 0
+
             def emit(msg):
                 queue.put_nowait(msg)
 
-            per_client_files, failures, consolidated = await _run_bulk_pipeline(emit, clients)
+            per_client_files, failures, consolidated = await _run_bulk_pipeline(
+                emit, clients, pending_count=pending_count,
+            )
 
             if not per_client_files:
                 await queue.put({"type": "error",
@@ -460,7 +483,15 @@ async def send_today():
         return {"error": f"No hay archivos consolidados para hoy ({today}) en {consolidated_dir}"}
 
     try:
-        send_consolidated_slack(found)
+        pending = await fetch_active_missing_team_id()
+        discarded = discarded_clients.load()
+        pending_count = sum(1 for p in pending if p["siete_id"] not in discarded)
+    except Exception as e:
+        print(f"[send-today] Warning pendientes: {e}")
+        pending_count = 0
+
+    try:
+        send_consolidated_slack(found, pending_count=pending_count)
     except Exception as e:
         traceback.print_exc()
         return {
@@ -546,12 +577,99 @@ async def diagnostics():
 
 @app.get("/api/reconciliation/pending")
 async def reconciliation_pending():
-    """Lista los clientes Active en Siete sin team_id + sugerencias de Reply.io."""
+    """Lista los clientes Active en Siete sin team_id (filtrando descartados localmente)
+    + sugerencias de Reply.io."""
     siete_pending = await fetch_active_missing_team_id()
+    discarded = discarded_clients.load()
+    siete_pending = [p for p in siete_pending if p["siete_id"] not in discarded]
     if not siete_pending:
         return {"pending": [], "reply_options": [], "scrape_error": None}
     reply_workspaces = await fetch_reply_workspaces_live()  # None si falla
     return build_pending_payload(siete_pending, reply_workspaces)
+
+
+@app.post("/api/reconciliation/discard")
+async def reconciliation_discard(body: dict):
+    """Agrega un siete_id a la lista local de descartados (idempotente).
+    NO toca Siete API.
+    """
+    siete_id = body.get("siete_id")
+    if not isinstance(siete_id, int) or siete_id <= 0:
+        return JSONResponse(status_code=400, content={"error": f"siete_id inválido: {siete_id!r}"})
+    discarded_clients.add(siete_id)
+    return {"discarded": True, "siete_id": siete_id}
+
+
+@app.post("/api/reconciliation/restore")
+async def reconciliation_restore(body: dict):
+    """Quita un siete_id de la lista local de descartados (idempotente)."""
+    siete_id = body.get("siete_id")
+    if not isinstance(siete_id, int) or siete_id <= 0:
+        return JSONResponse(status_code=400, content={"error": f"siete_id inválido: {siete_id!r}"})
+    discarded_clients.remove(siete_id)
+    return {"restored": True, "siete_id": siete_id}
+
+
+@app.get("/api/reconciliation/discarded")
+async def reconciliation_discarded():
+    """Lista los clientes descartados localmente resolviendo nombre vía Siete API.
+
+    Si un id descartado ya no existe en Siete, se omite del response
+    (pero NO se borra del archivo — eso lo hace el operador con restore).
+    """
+    ids = discarded_clients.load()
+    if not ids:
+        return {"discarded": []}
+    try:
+        data = await _fetch_all_clientes()
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": f"siete_api: {type(e).__name__}: {e}"})
+    by_id = {c["id"]: c for c in data}
+    out = []
+    for sid in sorted(ids):
+        c = by_id.get(sid)
+        if not c:
+            continue
+        out.append({
+            "siete_id": sid,
+            "siete_name": c.get("cliente"),
+            "siete_slug": _slug(c.get("cliente") or ""),
+            "status": c.get("status"),
+            "team_id": c.get("team_id"),
+        })
+    return {"discarded": out}
+
+
+@app.get("/api/clients/mapping")
+async def clients_mapping():
+    """Devuelve el mapeo completo de clientes Siete con match contra workspaces Reply.io."""
+    try:
+        siete_clients = await _fetch_all_clientes()
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": f"siete_api: {type(e).__name__}: {e}"})
+    reply_workspaces = await fetch_reply_workspaces_live()  # None si falla
+    return build_mapping_payload(siete_clients, reply_workspaces)
+
+
+@app.patch("/api/clients/{siete_id}/team-id")
+async def patch_client_team_id(siete_id: int, body: dict):
+    """Actualiza el team_id de un cliente en Siete. Acepta `null` para desvincular.
+
+    Body: {"team_id": int | null}
+    """
+    if "team_id" not in body:
+        return JSONResponse(status_code=400, content={"error": "falta campo 'team_id'"})
+    team_id = body["team_id"]
+    if team_id is not None and (not isinstance(team_id, int) or team_id <= 0):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"team_id inválido: {team_id!r} (debe ser int > 0 o null)"},
+        )
+    try:
+        updated = await patch_team_id(siete_id=siete_id, team_id=team_id)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"{type(e).__name__}: {e}"})
+    return updated
 
 
 @app.post("/api/reconciliation/save")

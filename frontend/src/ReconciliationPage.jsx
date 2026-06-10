@@ -12,6 +12,9 @@ export default function ReconciliationPage() {
   const [saving, setSaving] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
+  const [discardedOpen, setDiscardedOpen] = useState(false)
+  const [discarded, setDiscarded] = useState([])
+  const [discardedLoading, setDiscardedLoading] = useState(false)
 
   function loadPending() {
     setLoading(true)
@@ -40,6 +43,55 @@ export default function ReconciliationPage() {
   }
 
   useEffect(() => { loadPending() }, [])
+
+  function loadDiscarded() {
+    setDiscardedLoading(true)
+    fetch(`${API}/reconciliation/discarded`)
+      .then(r => r.json())
+      .then(data => {
+        setDiscarded(data.discarded || [])
+        setDiscardedLoading(false)
+      })
+      .catch(e => {
+        setError(`No se pudo cargar descartados: ${e.message}`)
+        setDiscardedLoading(false)
+      })
+  }
+
+  function handleDiscard(siete_id, siete_name) {
+    if (!confirm(`Descartar a "${siete_name}"? No aparecerá más como pendiente (no toca Siete).`)) return
+    fetch(`${API}/reconciliation/discard`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siete_id }),
+    })
+      .then(r => r.json())
+      .then(() => {
+        loadPending()
+        if (discardedOpen) loadDiscarded()
+      })
+      .catch(e => setError(`Error descartando: ${e.message}`))
+  }
+
+  function handleRestore(siete_id) {
+    fetch(`${API}/reconciliation/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ siete_id }),
+    })
+      .then(r => r.json())
+      .then(() => {
+        loadDiscarded()
+        loadPending()
+      })
+      .catch(e => setError(`Error restaurando: ${e.message}`))
+  }
+
+  function toggleDiscarded() {
+    const next = !discardedOpen
+    setDiscardedOpen(next)
+    if (next && discarded.length === 0) loadDiscarded()
+  }
 
   function handleSelect(siete_id, value) {
     setSelections(prev => ({ ...prev, [siete_id]: value }))
@@ -101,7 +153,10 @@ export default function ReconciliationPage() {
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>Reconciliación de Clientes</h1>
+      <div style={styles.headerRow}>
+        <h1 style={styles.title}>Reconciliación de Clientes</h1>
+        <a href="/clients" style={styles.linkAction}>Ver mapeo completo →</a>
+      </div>
       <p style={styles.subtitle}>
         Clientes activos en Siete sin <code>team_id</code> de Reply.io.
         Elegí el workspace correspondiente y guardá; se actualiza Siete via PATCH.
@@ -123,6 +178,7 @@ export default function ReconciliationPage() {
                 <th style={styles.th}>#</th>
                 <th style={styles.th}>Cliente Siete</th>
                 <th style={styles.th}>Workspace Reply.io</th>
+                <th style={styles.th}></th>
               </tr>
             </thead>
             <tbody>
@@ -168,6 +224,16 @@ export default function ReconciliationPage() {
                           style={styles.manualInput}
                         />
                       )}
+                    </td>
+                    <td style={styles.td}>
+                      <button
+                        type="button"
+                        onClick={() => handleDiscard(p.siete_id, p.siete_name)}
+                        style={styles.discardButton}
+                        title="Descartar localmente (no toca Siete)"
+                      >
+                        Descartar
+                      </button>
                     </td>
                   </tr>
                 )
@@ -217,6 +283,53 @@ export default function ReconciliationPage() {
       )}
 
       {error && <div style={styles.errorCard}>{error}</div>}
+
+      <div style={styles.discardedSection}>
+        <button type="button" onClick={toggleDiscarded} style={styles.discardedToggle}>
+          {discardedOpen ? '▼' : '▶'} Clientes descartados {discarded.length > 0 ? `(${discarded.length})` : ''}
+        </button>
+        {discardedOpen && (
+          <div style={styles.discardedContent}>
+            {discardedLoading ? (
+              <p style={styles.muted}>Cargando…</p>
+            ) : discarded.length === 0 ? (
+              <p style={styles.muted}>No hay clientes descartados.</p>
+            ) : (
+              <table style={styles.table}>
+                <thead>
+                  <tr style={styles.tr}>
+                    <th style={styles.th}>Cliente</th>
+                    <th style={styles.th}>Status</th>
+                    <th style={styles.th}>team_id</th>
+                    <th style={styles.th}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {discarded.map(d => (
+                    <tr key={d.siete_id} style={styles.tr}>
+                      <td style={styles.td}>
+                        <strong>{d.siete_name}</strong>
+                        <div style={styles.slug}>siete_id: {d.siete_id} · slug: {d.siete_slug}</div>
+                      </td>
+                      <td style={styles.td}>{d.status || '—'}</td>
+                      <td style={styles.td}>{d.team_id ?? '—'}</td>
+                      <td style={styles.td}>
+                        <button
+                          type="button"
+                          onClick={() => handleRestore(d.siete_id)}
+                          style={styles.restoreButton}
+                        >
+                          Restaurar
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -255,4 +368,22 @@ const styles = {
   errorCard: { marginTop: 16, padding: 12, background: '#ffebee',
                 border: '1px solid #ef9a9a', borderRadius: 6,
                 fontSize: 14, color: '#c62828' },
+  headerRow: { display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', marginBottom: 8 },
+  linkAction: { fontSize: 12, color: '#2563eb', textDecoration: 'none',
+                  padding: '6px 10px', background: '#eff6ff',
+                  border: '1px solid #bfdbfe', borderRadius: 6 },
+  discardButton: { padding: '6px 12px', background: 'white',
+                     color: '#c62828', border: '1px solid #ef9a9a',
+                     borderRadius: 4, cursor: 'pointer', fontSize: 12 },
+  restoreButton: { padding: '6px 12px', background: 'white',
+                     color: '#2c7a3e', border: '1px solid #66bb6a',
+                     borderRadius: 4, cursor: 'pointer', fontSize: 12 },
+  discardedSection: { marginTop: 32, paddingTop: 16,
+                        borderTop: '1px solid #e0e0e0' },
+  discardedToggle: { background: 'none', border: 'none',
+                       cursor: 'pointer', fontSize: 14, color: '#555',
+                       padding: 0, fontWeight: 500 },
+  discardedContent: { marginTop: 12 },
+  muted: { color: '#999', fontSize: 13, fontStyle: 'italic' },
 }

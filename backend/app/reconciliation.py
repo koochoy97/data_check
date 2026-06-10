@@ -7,6 +7,7 @@ import os
 from typing import Iterable
 
 from app.scraper.reply_io import fetch_workspaces
+from app.siete_api import _is_excluded
 from app.utils.slug import slug
 
 
@@ -75,5 +76,41 @@ def build_pending_payload(siete_pending: list[dict],
     return {
         "pending": pending,
         "reply_options": reply_options,
+        "scrape_error": None if reply_workspaces is not None else "Reply.io scrape failed",
+    }
+
+
+def build_mapping_payload(siete_clients: list[dict],
+                          reply_workspaces: list[dict] | None) -> dict:
+    """Arma el payload del endpoint GET /api/clients/mapping.
+
+    Cada item: {siete_id, siete_name, siete_slug, status, team_id, reply_match}.
+    `reply_match` es {name, team_id} cuando el team_id del cliente matchea
+    un workspace conocido, o None en otro caso.
+    """
+    by_team_id: dict[int, dict] = {}
+    if reply_workspaces:
+        for ws in reply_workspaces:
+            try:
+                by_team_id[int(ws["team_id"])] = ws
+            except (TypeError, ValueError, KeyError):
+                continue
+
+    out = []
+    for c in siete_clients:
+        if _is_excluded(c.get("cliente", "") or ""):
+            continue
+        team_id = c.get("team_id")
+        match = by_team_id.get(int(team_id)) if team_id else None
+        out.append({
+            "siete_id": c["id"],
+            "siete_name": c.get("cliente"),
+            "siete_slug": slug(c.get("cliente") or ""),
+            "status": c.get("status"),
+            "team_id": team_id,
+            "reply_match": {"name": match["name"], "team_id": match["team_id"]} if match else None,
+        })
+    return {
+        "clients": out,
         "scrape_error": None if reply_workspaces is not None else "Reply.io scrape failed",
     }

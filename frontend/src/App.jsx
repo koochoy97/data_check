@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import ReconciliationPage from './ReconciliationPage'
+import ClientsMappingPage from './ClientsMappingPage'
 
 const API = '/api'
 
@@ -10,11 +11,13 @@ function formatBytes(bytes) {
 }
 
 export default function App() {
-  // Simple path-based routing: /reconciliation renders the reconciliation page,
-  // anything else renders the main report generator.
+  // Simple path-based routing.
   const path = typeof window !== 'undefined' ? window.location.pathname : '/'
   if (path === '/reconciliation' || path === '/reconciliation/') {
     return <ReconciliationPage />
+  }
+  if (path === '/clients' || path === '/clients/') {
+    return <ClientsMappingPage />
   }
   return <HomePage />
 }

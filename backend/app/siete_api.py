@@ -71,20 +71,20 @@ async def fetch_active_missing_team_id() -> list[dict]:
     ]
 
 
-async def patch_team_id(siete_id: int, team_id: int) -> dict:
-    """Actualiza el team_id de un cliente en Siete API.
+async def patch_team_id(siete_id: int, team_id: int | None) -> dict:
+    """Actualiza el team_id de un cliente en Siete API. Acepta None para desvincular.
 
-    Retorna el registro actualizado. Levanta httpx.HTTPStatusError si falla.
+    Retorna el registro actualizado. Levanta httpx.HTTPStatusError si Siete rechaza.
     """
     if not SIETE_API_KEY:
         raise RuntimeError("Falta env var X-HEADER-SIETE-API")
-    if not isinstance(team_id, int) or team_id <= 0:
+    if team_id is not None and (not isinstance(team_id, int) or team_id <= 0):
         raise ValueError(f"team_id inválido: {team_id!r}")
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         r = await client.patch(
             f"{SIETE_API_ENDPOINT}/core/clientes/{siete_id}/",
-            json={"team_id": team_id},
+            json={"team_id": team_id},  # serializa None como JSON null
             headers={
                 "x-api-key": SIETE_API_KEY,
                 "Content-Type": "application/json",

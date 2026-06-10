@@ -24,7 +24,7 @@ SLACK_API = "https://slack.com/api/chat.postMessage"
 SLACK_LOOKUP = "https://slack.com/api/users.lookupByEmail"
 
 
-def send_consolidated_slack(consolidated: dict[str, Path]) -> None:
+def send_consolidated_slack(consolidated: dict[str, Path], pending_count: int = 0) -> None:
     if not consolidated:
         return
     if not SLACK_BOT_TOKEN:
@@ -40,7 +40,7 @@ def send_consolidated_slack(consolidated: dict[str, Path]) -> None:
         "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
         "Content-Type": "application/json; charset=utf-8",
     }
-    text = _build_message(consolidated)
+    text = _build_message(consolidated, pending_count=pending_count)
 
     failures = []
     for raw in destinations:
@@ -108,7 +108,7 @@ def _post_with_retry(channel: str, text: str, headers: dict, label: str) -> None
             raise
 
 
-def _build_message(consolidated: dict[str, Path]) -> str:
+def _build_message(consolidated: dict[str, Path], pending_count: int = 0) -> str:
     date_str = _date_from_consolidated(consolidated)
     lines = [
         f"*Reportes consolidados de Reply.io del {date_str}*",
@@ -119,6 +119,14 @@ def _build_message(consolidated: dict[str, Path]) -> str:
         size_mb = path.stat().st_size / 1024 / 1024
         url = f"{PUBLIC_BASE_URL}/api/consolidated/{path.name}"
         lines.append(f"• <{url}|{path.name}> ({size_mb:.1f} MB)")
+    if pending_count > 0:
+        plural = "s" if pending_count != 1 else ""
+        recon_url = f"{PUBLIC_BASE_URL.rstrip('/')}/reconciliation"
+        lines.append("")
+        lines.append(
+            f"⚠️ Hay {pending_count} cliente{plural} pendiente{plural} de reconciliar: "
+            f"<{recon_url}|abrir reconciliación>"
+        )
     return "\n".join(lines)
 
 
