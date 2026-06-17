@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import ReconciliationPage from './ReconciliationPage'
 import ClientsMappingPage from './ClientsMappingPage'
+import DownloadLogsPage from './DownloadLogsPage'
 
 const API = '/api'
 
@@ -18,6 +19,9 @@ export default function App() {
   }
   if (path === '/clients' || path === '/clients/') {
     return <ClientsMappingPage />
+  }
+  if (path === '/download-logs' || path === '/download-logs/') {
+    return <DownloadLogsPage />
   }
   return <HomePage />
 }

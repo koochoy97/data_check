@@ -6,23 +6,26 @@ Reports are delivered via Slack only (no Gmail). Reconciliation of clients
 without team_id happens via the `/reconciliation` UI.
 """
 import asyncio
+import io
 import json
 import os
 import traceback
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from app.config import REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, PUBLIC_BASE_URL
+from app.config import REPLY_IO_EMAIL, REPLY_IO_PASSWORD, DOWNLOAD_DIR, PUBLIC_BASE_URL, TFLX_PATH
 from app import discarded_clients
 from app.cron_report import CronRunReport, load_last_cron_run
 from app.processing.consolidator import consolidate
+from app.processing.tableau_exporter import run_tableau_export
 from app.processing.send_slack import (
     send_consolidated_slack,
     send_reconciliation_alert,
@@ -38,6 +41,7 @@ from app.siete_api import (
     _fetch_all_clientes,
     fetch_active_clients,
     fetch_active_missing_team_id,
+    fetch_all_meetings,
     patch_team_id,
 )
 from app.utils.slug import slug as _slug
@@ -55,6 +59,8 @@ def _cleanup_old_files(root: Path, max_age_hours: int = MAX_FILE_AGE_HOURS) -> i
     cutoff = datetime.now().timestamp() - max_age_hours * 3600
     deleted = 0
     for path in root.rglob("*"):
+        if path.suffix == ".tflx":
+            continue
         if path.is_file() and path.stat().st_mtime < cutoff:
             try:
                 path.unlink()
@@ -138,8 +144,15 @@ async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
                   "path": f"/api/consolidated/{path.name}"})
 
         emit({"type": "progress", "message": "Enviando a Slack..."})
+        xlsx_bytes: bytes | None = None
         try:
-            send_consolidated_slack(consolidated, pending_count=pending_count)
+            from app.processing.tableau_exporter import generate_reuniones_xlsx
+            meetings = await fetch_all_meetings()
+            xlsx_bytes = generate_reuniones_xlsx(meetings)
+        except Exception as e:
+            print(f"[slack] Warning: no se pudo generar xlsx de reuniones: {e}")
+        try:
+            send_consolidated_slack(consolidated, pending_count=pending_count, xlsx_bytes=xlsx_bytes)
             emit({"type": "progress", "message": "Mensaje enviado a Slack"})
         except Exception as e:
             traceback.print_exc()
@@ -231,6 +244,17 @@ async def _run_daily_cron_once() -> CronRunReport:
     # Paso 3: alerta de reconciliación si hay pendientes
     if pending:
         send_reconciliation_alert(pending_count=len(pending), base_url=PUBLIC_BASE_URL)
+
+    # Paso 4: export a Tableau Cloud (no aborta el pipeline si falla)
+    if consolidated:
+        try:
+            print("[bulk-cron] Iniciando export a Tableau...")
+            meetings = await fetch_all_meetings()
+            tableau_result = await run_tableau_export(consolidated, meetings)
+            for step, status in tableau_result.items():
+                print(f"[tableau] {step}: {status}")
+        except Exception as e:
+            print(f"[tableau] ERROR en export: {e}")
 
     report.finish()
     report.save()
@@ -490,8 +514,16 @@ async def send_today():
         print(f"[send-today] Warning pendientes: {e}")
         pending_count = 0
 
+    xlsx_bytes: bytes | None = None
     try:
-        send_consolidated_slack(found, pending_count=pending_count)
+        from app.processing.tableau_exporter import generate_reuniones_xlsx
+        meetings = await fetch_all_meetings()
+        xlsx_bytes = generate_reuniones_xlsx(meetings)
+    except Exception as e:
+        print(f"[send-today] Warning: no se pudo generar xlsx de reuniones: {e}")
+
+    try:
+        send_consolidated_slack(found, pending_count=pending_count, xlsx_bytes=xlsx_bytes)
     except Exception as e:
         traceback.print_exc()
         return {
@@ -505,6 +537,76 @@ async def send_today():
         "sent": True,
         "files": [p.name for p in found.values()],
         "date": today,
+    }
+
+
+@app.post("/api/upload-tflx")
+async def upload_tflx(file: UploadFile = File(...)):
+    """Sube el .tflx al servidor y lo guarda en TFLX_PATH.
+
+    Uso:
+        curl -X POST https://data-check.wearesiete.com/api/upload-tflx \\
+             -F "file=@/ruta/local/flujo.tflx"
+    """
+    dest = Path(TFLX_PATH) if TFLX_PATH else DOWNLOAD_DIR / file.filename
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    data = await file.read()
+
+    # Validar que sea un ZIP válido (los .tflx son ZIPs)
+    if not zipfile.is_zipfile(io.BytesIO(data)):
+        raise HTTPException(status_code=400, detail="El archivo no es un .tflx válido (no es un ZIP)")
+
+    dest.write_bytes(data)
+    return {"saved_to": str(dest), "size_mb": round(len(data) / 1024 / 1024, 1)}
+
+
+@app.post("/api/export-tableau")
+async def export_tableau():
+    """Genera los 3 archivos Tableau, actualiza el .tflx y publica a Tableau Cloud.
+
+    Usa los CSVs consolidados del día (hora Perú) que ya existan en disco.
+    No re-descarga Reply.io — requiere haber corrido /api/generate-bulk primero.
+    """
+    today = today_peru_iso()
+    consolidated_dir = DOWNLOAD_DIR / "consolidated"
+
+    found: dict[str, Path] = {}
+    for kind, prefix in [("people", "people_consolidated"), ("email_activity", "email_activity_consolidated")]:
+        path = consolidated_dir / f"{prefix}_{today}.csv"
+        if path.exists():
+            found[kind] = path
+
+    if not found:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No hay CSVs consolidados para hoy ({today}). Correr /api/generate-bulk primero.",
+        )
+
+    try:
+        meetings = await fetch_all_meetings()
+    except Exception as e:
+        traceback.print_exc()
+        # Generamos los CSVs igual aunque REUNIONES falle
+        meetings = []
+        reuniones_error = str(e)
+    else:
+        reuniones_error = None
+
+    try:
+        result = await run_tableau_export(found, meetings)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if reuniones_error:
+        result["reuniones_fetch"] = f"error: {reuniones_error}"
+
+    return {
+        "date": today,
+        "csvs_found": list(found.keys()),
+        "meetings_fetched": len(meetings),
+        "steps": result,
     }
 
 
@@ -704,6 +806,51 @@ async def sync_clients_gone():
         status_code=410,
         content={"error": "Removed: clients.json was eliminated. Use /reconciliation to add team_ids to Siete."},
     )
+
+
+@app.get("/api/client-stats")
+def client_stats():
+    """Conteo de filas por cliente en los CSVs consolidados más recientes."""
+    import pandas as pd
+
+    consolidated_dir = DOWNLOAD_DIR / "consolidated"
+    result: dict = {"date": None, "clients": []}
+
+    def _latest(prefix: str):
+        files = sorted(consolidated_dir.glob(f"{prefix}_*.csv"), reverse=True)
+        return files[0] if files else None
+
+    people_path = _latest("people_consolidated")
+    email_path  = _latest("email_activity_consolidated")
+
+    if not people_path and not email_path:
+        return JSONResponse(status_code=404, content={"error": "No hay CSVs consolidados"})
+
+    if people_path:
+        stem = people_path.stem
+        result["date"] = stem.split("_")[-1]
+
+    people_counts: dict = {}
+    email_counts:  dict = {}
+
+    if people_path:
+        df = pd.read_csv(people_path, usecols=["client_name"], low_memory=False)
+        people_counts = df["client_name"].value_counts().to_dict()
+
+    if email_path:
+        df = pd.read_csv(email_path, usecols=["client_name"], low_memory=False)
+        email_counts = df["client_name"].value_counts().to_dict()
+
+    all_clients = sorted(set(people_counts) | set(email_counts))
+    result["clients"] = [
+        {
+            "name": c,
+            "people": people_counts.get(c, 0),
+            "email_activity": email_counts.get(c, 0),
+        }
+        for c in all_clients
+    ]
+    return result
 
 
 @app.get("/api/health")

@@ -22,9 +22,15 @@ from app.config import (
 
 SLACK_API = "https://slack.com/api/chat.postMessage"
 SLACK_LOOKUP = "https://slack.com/api/users.lookupByEmail"
+SLACK_UPLOAD_URL = "https://slack.com/api/files.getUploadURLExternal"
+SLACK_COMPLETE_URL = "https://slack.com/api/files.completeUploadExternal"
 
 
-def send_consolidated_slack(consolidated: dict[str, Path], pending_count: int = 0) -> None:
+def send_consolidated_slack(
+    consolidated: dict[str, Path],
+    pending_count: int = 0,
+    xlsx_bytes: bytes | None = None,
+) -> None:
     if not consolidated:
         return
     if not SLACK_BOT_TOKEN:
@@ -53,6 +59,13 @@ def send_consolidated_slack(consolidated: dict[str, Path], pending_count: int = 
         except Exception as e:
             print(f"[slack] Falló envío a {raw}: {e}")
             failures.append(raw)
+            continue
+
+        if xlsx_bytes:
+            try:
+                _upload_file_to_channel(channel, xlsx_bytes, "REUNIONES_GLOBAL.xlsx", headers)
+            except Exception as e:
+                print(f"[slack] Falló upload xlsx a {raw}: {e}")
 
     if failures:
         raise RuntimeError(f"Slack: falló envío a {failures}")
@@ -108,6 +121,39 @@ def _post_with_retry(channel: str, text: str, headers: dict, label: str) -> None
             raise
 
 
+def _upload_file_to_channel(channel: str, content: bytes, filename: str, headers: dict) -> None:
+    """Sube un archivo a un canal usando la API de upload externo de Slack."""
+    # Paso 1: obtener URL de upload
+    r = httpx.post(
+        SLACK_UPLOAD_URL,
+        headers=headers,
+        data={"filename": filename, "length": len(content)},
+        timeout=30,
+    )
+    data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"getUploadURLExternal error: {data.get('error')}")
+    upload_url = data["upload_url"]
+    file_id = data["file_id"]
+
+    # Paso 2: subir el contenido
+    r2 = httpx.post(upload_url, content=content, timeout=60)
+    if r2.status_code not in (200, 201):
+        raise RuntimeError(f"Upload HTTP {r2.status_code}")
+
+    # Paso 3: completar y compartir en el canal
+    r3 = httpx.post(
+        SLACK_COMPLETE_URL,
+        headers=headers,
+        json={"files": [{"id": file_id, "title": filename}], "channel_id": channel},
+        timeout=30,
+    )
+    data3 = r3.json()
+    if not data3.get("ok"):
+        raise RuntimeError(f"completeUploadExternal error: {data3.get('error')}")
+    print(f"[slack] xlsx subido a {channel}: {filename}")
+
+
 def _build_message(consolidated: dict[str, Path], pending_count: int = 0) -> str:
     date_str = _date_from_consolidated(consolidated)
     lines = [
@@ -119,6 +165,11 @@ def _build_message(consolidated: dict[str, Path], pending_count: int = 0) -> str
         size_mb = path.stat().st_size / 1024 / 1024
         url = f"{PUBLIC_BASE_URL}/api/consolidated/{path.name}"
         lines.append(f"• <{url}|{path.name}> ({size_mb:.1f} MB)")
+
+    logs_url = f"{PUBLIC_BASE_URL.rstrip('/')}/download-logs"
+    lines.append("")
+    lines.append(f"<{logs_url}|Logs de descarga>")
+
     if pending_count > 0:
         plural = "s" if pending_count != 1 else ""
         recon_url = f"{PUBLIC_BASE_URL.rstrip('/')}/reconciliation"
