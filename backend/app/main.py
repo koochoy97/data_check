@@ -132,6 +132,17 @@ async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
                 "email_csv": result.get("correos"),
             })
 
+    # Emit full per-client outcome summary so operators can see all clients at a glance
+    ok_names = [f["client_name"] for f in per_client_files]
+    fail_names = [f.split(":", 1)[0].strip() for f in failures]
+    emit({"type": "progress",
+          "message": f"Resumen: {len(ok_names)}/{len(clients)} OK, {len(failures)} fallidos"})
+    emit({"type": "progress",
+          "message": f"OK ({len(ok_names)}): {', '.join(ok_names) or '(ninguno)'}"})
+    if fail_names:
+        emit({"type": "progress",
+              "message": f"FALLIDOS ({len(fail_names)}): {', '.join(fail_names)}"})
+
     consolidated = {}
     if per_client_files:
         emit({"type": "progress", "message": "Consolidando CSVs..."})
@@ -421,8 +432,6 @@ async def generate_bulk(limit: int = 0):
                 return
 
             done_msg = f"Listo. {len(per_client_files)}/{len(clients)} clientes consolidados."
-            if failures:
-                done_msg += f" Fallidos ({len(failures)}): {', '.join(f.split(':')[0] for f in failures)}"
             await queue.put({"type": "done", "message": done_msg})
 
         except Exception as e:
