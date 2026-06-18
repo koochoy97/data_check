@@ -39,3 +39,9 @@ if GOOGLE_REFRESH_TOKEN and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
     print("[config] Token reconstruido desde env vars individuales")
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "/tmp/reports"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+TFLX_PATH = os.getenv("TFLX_PATH")
+TABLEAU_SERVER_URL = os.getenv("TABLEAU_SERVER_URL")
+TABLEAU_SITE_ID = os.getenv("TABLEAU_SITE_ID", "")
+TABLEAU_PAT_NAME = os.getenv("TABLEAU_PAT_NAME")
+TABLEAU_PAT_SECRET = os.getenv("TABLEAU_PAT_SECRET")
