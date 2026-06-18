@@ -573,9 +573,16 @@ async def _trigger_people_export(page, download_dir: Path, emit) -> Path | None:
             break
         except Exception:
             await asyncio.sleep(2)
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
 
-    await page.locator("text=All in list").first.click(timeout=10_000)
+    for _ in range(4):
+        try:
+            loc = page.locator("text=All in list").or_(page.locator("text=All In List")).first
+            await loc.click(timeout=8_000)
+            break
+        except Exception:
+            await page.locator('[data-test-id="select-control-button"]').click(timeout=5_000)
+            await asyncio.sleep(2)
     await asyncio.sleep(2)
 
     # More > Export to CSV > All fields
