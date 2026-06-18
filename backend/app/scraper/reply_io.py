@@ -44,6 +44,7 @@ async def _switch_workspace(
 
     # ── Capa 1: validar status code del SwitchTeam ────────────────────────────
     resp = await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    emit(f"[switch] URL final tras SwitchTeam: {page.url}")
 
     if resp is None:
         reason = "SwitchTeam: no se obtuvo response del servidor"
@@ -60,29 +61,33 @@ async def _switch_workspace(
         _emit_workspace_alert(alert_context, reason, emit)
         raise WorkspaceUnavailable(f"teamId={team_id}: {reason}")
 
-    # ── Capa 2: validar workspace activo vía /Team/GetTeamData ────────────────
-    await asyncio.sleep(3)  # gracia para que la sesión se asiente server-side
+    # ── Capa 2: validar workspace activo ─────────────────────────────────────
+    await asyncio.sleep(3)
 
+    # Intentar GetTeamData; si devuelve 307 probar endpoint alternativo
     try:
         active = await page.evaluate(
             """async () => {
                 try {
-                    const r = await fetch('/Team/GetTeamData', {credentials: 'include'});
-                    if (!r.ok) return {__error: 'http_' + r.status};
-                    return await r.json();
+                    let r = await fetch('/Team/GetTeamData', {credentials: 'include', redirect: 'follow'});
+                    if (r.ok) return await r.json();
+                    // Fallback: endpoint alternativo conocido
+                    r = await fetch('/api/v2/teams/current', {credentials: 'include'});
+                    if (r.ok) return await r.json();
+                    return {__error: 'http_' + r.status};
                 } catch (e) {
                     return {__error: String(e)};
                 }
             }"""
         )
     except Exception as e:
-        emit(f"[switch] WARN: no pude consultar /Team/GetTeamData ({e}); confío en Capa 1")
+        emit(f"[switch] WARN: no pude consultar GetTeamData ({e}); confío en Capa 1")
         await asyncio.sleep(5)
         return
 
     if not isinstance(active, dict) or "__error" in active:
         err = active.get("__error", "respuesta no es dict") if isinstance(active, dict) else "respuesta no es dict"
-        emit(f"[switch] WARN: /Team/GetTeamData no disponible ({err}); confío en Capa 1")
+        emit(f"[switch] WARN: GetTeamData no disponible ({err}); confío en Capa 1")
         await asyncio.sleep(5)
         return
 
@@ -92,7 +97,7 @@ async def _switch_workspace(
         or active.get("currentTeamId")
     )
     if observed_raw is None:
-        emit(f"[switch] WARN: /Team/GetTeamData no devolvió teamId/id/currentTeamId; confío en Capa 1")
+        emit(f"[switch] WARN: GetTeamData no devolvió teamId; confío en Capa 1")
         await asyncio.sleep(5)
         return
 
@@ -111,7 +116,7 @@ async def _switch_workspace(
         _emit_workspace_alert(alert_context, reason, emit)
         raise WorkspaceUnavailable(f"teamId={team_id}: {reason}")
 
-    await asyncio.sleep(5)  # tiempo de gracia que ya teníamos antes del flujo
+    await asyncio.sleep(5)
 
 
 def _emit_workspace_alert(alert_context: dict | None, reason: str, emit) -> None:
@@ -401,7 +406,7 @@ async def download_all_reports(
 
                     emit_client("Disparando export de Personas...")
                     people_direct = await _retry(
-                        lambda: _trigger_people_export(page, download_dir, emit_client),
+                        lambda: _trigger_people_export(page, download_dir, emit_client, context=context),
                         max_attempts=3, base_delay=5, emit=emit_client, label="trigger People export",
                     )
 
@@ -547,7 +552,30 @@ async def download_reports(
         return {"personas": people_csv, "correos": email_csv}
 
 
-async def _trigger_people_export(page, download_dir: Path, emit) -> Path | None:
+async def _dismiss_popups(page, context, emit) -> None:
+    """Cierra modales de marketing y tabs extra que Reply.io abre."""
+    # Cerrar tabs extra (Reply abre tabs en blanco a veces).
+    # Solo cerramos si hay MÁS de 2 páginas (page + page2 son las 2 normales).
+    all_pages = context.pages
+    if len(all_pages) > 2:
+        for p in all_pages:
+            if p != page and p.url in ("about:blank", ""):
+                await p.close()
+                emit("[popup] Tab en blanco extra cerrada")
+
+    # Cerrar modal de marketing si existe (Escape es inofensivo si no hay modal)
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(0.5)
+
+    # Si Escape no alcanzó, buscar botón X del dialog de MUI
+    close_btn = page.locator('.MuiDialog-root button[aria-label="close"], .MuiDialog-root button:has([data-testid="CloseIcon"]), .MuiDialog-paper button').first
+    if await close_btn.count() > 0:
+        await close_btn.click(timeout=3_000)
+        emit("[popup] Modal de Reply cerrado")
+        await asyncio.sleep(0.5)
+
+
+async def _trigger_people_export(page, download_dir: Path, emit, context=None) -> Path | None:
     """Navigate to People, select all, trigger All fields export.
     Returns Path if direct download happened, None if async (notification)."""
     await page.goto(
@@ -556,6 +584,10 @@ async def _trigger_people_export(page, download_dir: Path, emit) -> Path | None:
         timeout=30_000,
     )
     await asyncio.sleep(5)
+
+    if context:
+        await _dismiss_popups(page, context, emit)
+        await asyncio.sleep(1)
 
     # Click "All" tab — retry because Reply UI is slow to render
     for _ in range(3):
@@ -566,13 +598,21 @@ async def _trigger_people_export(page, download_dir: Path, emit) -> Path | None:
             await asyncio.sleep(2)
     await asyncio.sleep(2)
 
+    # Verificar que el workspace tiene contacts — si All muestra (0) el switch falló
+    import re as _re
+    all_tab_text = await page.locator('text=/^All\\s*\\(\\d+\\)/').first.inner_text(timeout=10_000)
+    emit(f"[debug] All tab: {all_tab_text!r}")
+    match = _re.search(r'\(\s*(\d+)\s*\)', all_tab_text, _re.DOTALL)
+    if not match:
+        raise RuntimeError(f"workspace_empty_after_switch: no se pudo parsear conteo del All tab: {all_tab_text!r}")
+    count = int(match.group(1))
+    if count == 0:
+        raise RuntimeError("workspace_empty_after_switch: All tab muestra 0 contactos — el workspace switch no funcionó")
+
     # Select all in list — wait for button to be enabled (Reply loads contacts async)
     select_btn = page.locator('[data-test-id="select-control-button"]')
-    try:
-        await select_btn.wait_for(state="visible", timeout=60_000)
-        await select_btn.wait_for(state="enabled", timeout=60_000)
-    except Exception:
-        pass
+    await select_btn.wait_for(state="visible", timeout=60_000)
+    await page.wait_for_selector('[data-test-id="select-control-button"]:enabled', timeout=60_000)
     for _ in range(3):
         try:
             await select_btn.click(timeout=15_000)
