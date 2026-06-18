@@ -160,11 +160,14 @@ async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
             from app.processing.tableau_exporter import generate_reuniones_xlsx
             meetings = await fetch_all_meetings()
             xlsx_bytes = generate_reuniones_xlsx(meetings)
+            emit({"type": "progress", "message": f"Xlsx de reuniones generado ({len(xlsx_bytes):,} bytes)"})
         except Exception as e:
-            print(f"[slack] Warning: no se pudo generar xlsx de reuniones: {e}")
+            traceback.print_exc()
+            emit({"type": "progress", "message": f"[warn] No se pudo generar xlsx de reuniones: {e}"})
         try:
             send_consolidated_slack(consolidated, pending_count=pending_count, xlsx_bytes=xlsx_bytes)
-            emit({"type": "progress", "message": "Mensaje enviado a Slack"})
+            xlsx_status = "con xlsx" if xlsx_bytes else "sin xlsx (falló generación)"
+            emit({"type": "progress", "message": f"Mensaje enviado a Slack ({xlsx_status})"})
         except Exception as e:
             traceback.print_exc()
             print(f"[slack] ERROR: {e}")
