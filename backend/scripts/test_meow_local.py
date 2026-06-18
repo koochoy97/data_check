@@ -15,7 +15,7 @@ async def main():
     result = await download_all_reports(
         email=os.environ["REPLY_IO_EMAIL"],
         password=os.environ["REPLY_IO_PASSWORD"],
-        clients=[{"client_id": "mova", "client_name": "MOVA", "team_id": 479156, "download_dir": "/tmp/test_mova"}],
+        clients=[{"client_id": "meow", "client_name": "MEOW", "team_id": 487352, "download_dir": "/tmp/test_meow"}],
         on_progress=print,
         headless=False,
     )

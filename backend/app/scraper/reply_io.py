@@ -607,7 +607,7 @@ async def _trigger_people_export(page, download_dir: Path, emit, context=None) -
         raise RuntimeError(f"workspace_empty_after_switch: no se pudo parsear conteo del All tab: {all_tab_text!r}")
     count = int(match.group(1))
     if count == 0:
-        raise RuntimeError("workspace_empty_after_switch: All tab muestra 0 contactos — el workspace switch no funcionó")
+        raise RuntimeError("no encontró botón de descarga: workspace sin contactos (All = 0)")
 
     # Select all in list — wait for button to be enabled (Reply loads contacts async)
     select_btn = page.locator('[data-test-id="select-control-button"]')
