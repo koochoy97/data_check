@@ -566,13 +566,19 @@ async def _trigger_people_export(page, download_dir: Path, emit) -> Path | None:
             await asyncio.sleep(2)
     await asyncio.sleep(2)
 
-    # Select all in list
+    # Select all in list — wait for button to be enabled (Reply loads contacts async)
+    select_btn = page.locator('[data-test-id="select-control-button"]')
+    try:
+        await select_btn.wait_for(state="visible", timeout=60_000)
+        await select_btn.wait_for(state="enabled", timeout=60_000)
+    except Exception:
+        pass
     for _ in range(3):
         try:
-            await page.locator('[data-test-id="select-control-button"]').click(timeout=10_000)
+            await select_btn.click(timeout=15_000)
             break
         except Exception:
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
     await asyncio.sleep(2)
 
     for _ in range(4):
@@ -581,7 +587,7 @@ async def _trigger_people_export(page, download_dir: Path, emit) -> Path | None:
             await loc.click(timeout=8_000)
             break
         except Exception:
-            await page.locator('[data-test-id="select-control-button"]').click(timeout=5_000)
+            await select_btn.click(timeout=10_000)
             await asyncio.sleep(2)
     await asyncio.sleep(2)
 
