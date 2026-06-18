@@ -71,6 +71,31 @@ async def fetch_active_missing_team_id() -> list[dict]:
     ]
 
 
+async def fetch_all_meetings(page_size: int = 500) -> list[dict]:
+    """Trae todas las reuniones de /prospection/siete_service_meetings/ con paginación."""
+    if not SIETE_API_KEY:
+        raise RuntimeError("Falta env var X-HEADER-SIETE-API")
+
+    records: list[dict] = []
+    offset = 0
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        while True:
+            r = await client.get(
+                f"{SIETE_API_ENDPOINT}/prospection/siete_service_meetings/",
+                params={"limit": page_size, "offset": offset},
+                headers={"x-api-key": SIETE_API_KEY},
+            )
+            r.raise_for_status()
+            page = r.json()
+            if not page:
+                break
+            records.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+    return records
+
+
 async def patch_team_id(siete_id: int, team_id: int | None) -> dict:
     """Actualiza el team_id de un cliente en Siete API. Acepta None para desvincular.
 
