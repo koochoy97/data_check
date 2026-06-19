@@ -355,23 +355,20 @@ async def download_all_reports(
             accept_downloads=True,
         )
         page = await context.new_page()
-        page2 = await context.new_page()
 
         # ── LOGIN ONCE ──
         await _login_reply_io(page, email, password, emit)
         emit(f"Sesión iniciada. Procesando {len(clients)} clientes...")
 
         async def recycle_pages(reason: str):
-            """Cierra y recrea las páginas (mantiene cookies del context)."""
-            nonlocal page, page2
+            """Cierra y recrea la página principal (mantiene cookies del context)."""
+            nonlocal page
             emit(f"[recycle] Reciclando páginas ({reason})...")
-            for p_obj in (page, page2):
-                try:
-                    await p_obj.close()
-                except Exception:
-                    pass
+            try:
+                await page.close()
+            except Exception:
+                pass
             page = await context.new_page()
-            page2 = await context.new_page()
             await asyncio.sleep(2)
 
         # ── LOOP CLIENTS ──
@@ -410,17 +407,27 @@ async def download_all_reports(
                         max_attempts=3, base_delay=5, emit=emit_client, label="trigger People export",
                     )
 
+                    # Crear page2 aquí — justo antes de necesitarlo.
+                    # Si existe antes, Reply.io podría cerrarlo al abrir tabs extra en blanco
+                    # durante el people export y _dismiss_popups no podría distinguirlo.
+                    page2 = await context.new_page()
                     emit_client("Disparando export de Correos...")
-                    await _retry(
-                        lambda: _trigger_email_export(page2, emit_client),
-                        max_attempts=3, base_delay=5, emit=emit_client, label="trigger Email export",
-                    )
+                    try:
+                        await _retry(
+                            lambda: _trigger_email_export(page2, emit_client),
+                            max_attempts=3, base_delay=5, emit=emit_client, label="trigger Email export",
+                        )
 
-                    need_people = people_direct is None
-                    emit_client(f"Esperando descargas (people={need_people}, correos=True)...")
-                    people_notif, email_csv = await _poll_both_downloads(
-                        page, page2, download_dir, emit_client, need_people=need_people,
-                    )
+                        need_people = people_direct is None
+                        emit_client(f"Esperando descargas (people={need_people}, correos=True)...")
+                        people_notif, email_csv = await _poll_both_downloads(
+                            page, page2, download_dir, emit_client, need_people=need_people,
+                        )
+                    finally:
+                        try:
+                            await page2.close()
+                        except Exception:
+                            pass
 
                     people_csv = people_direct or people_notif
                     results[cid] = {"personas": people_csv, "correos": email_csv}
@@ -456,10 +463,6 @@ async def download_all_reports(
                     results[cid] = {"error": err_str}
                     break
 
-        try:
-            await page2.close()
-        except Exception:
-            pass
         await browser.close()
 
     return results
@@ -524,7 +527,7 @@ async def download_reports(
 
         emit("Disparando export de Personas (All fields)...")
         people_direct = await _retry(
-            lambda: _trigger_people_export(page, download_dir, emit),
+            lambda: _trigger_people_export(page, download_dir, emit, context=context, page2=page2),
             max_attempts=3, base_delay=5, emit=emit, label="trigger People export",
         )
 
@@ -554,10 +557,11 @@ async def download_reports(
 
 async def _dismiss_popups(page, context, emit) -> None:
     """Cierra modales de marketing y tabs extra que Reply.io abre."""
-    # Cerrar tabs extra (Reply abre tabs en blanco a veces).
-    # Solo cerramos si hay MÁS de 2 páginas (page + page2 son las 2 normales).
+    # Cerrar tabs extra en blanco. page2 no existe en este momento (se crea
+    # justo antes del email export), así que cualquier about:blank aquí
+    # es garantizadamente un tab basura de Reply.io.
     all_pages = context.pages
-    if len(all_pages) > 2:
+    if len(all_pages) > 1:
         for p in all_pages:
             if p != page and p.url in ("about:blank", ""):
                 await p.close()
