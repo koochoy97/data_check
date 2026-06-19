@@ -48,27 +48,31 @@ def send_consolidated_slack(
     }
     text = _build_message(consolidated, pending_count=pending_count)
 
-    failures = []
+    msg_failures = []
+    xlsx_failures = []
     for raw in destinations:
         channel = _resolve_destination(raw, headers)
         if not channel:
-            failures.append(raw)
+            msg_failures.append(raw)
             continue
         try:
-            _post_with_retry(channel, text, headers, label=raw)
+            actual_channel = _post_with_retry(channel, text, headers, label=raw)
         except Exception as e:
             print(f"[slack] Falló envío a {raw}: {e}")
-            failures.append(raw)
+            msg_failures.append(raw)
             continue
 
         if xlsx_bytes:
             try:
-                _upload_file_to_channel(channel, xlsx_bytes, "REUNIONES_GLOBAL.xlsx", headers)
+                _upload_file_to_channel(actual_channel, xlsx_bytes, "REUNIONES_GLOBAL.xlsx", headers)
             except Exception as e:
-                print(f"[slack] Falló upload xlsx a {raw}: {e}")
+                print(f"[slack] ERROR upload xlsx a {raw}: {e}")
+                xlsx_failures.append(f"{raw}: {e}")
 
-    if failures:
-        raise RuntimeError(f"Slack: falló envío a {failures}")
+    if msg_failures:
+        raise RuntimeError(f"Slack: falló envío del mensaje a {msg_failures}")
+    if xlsx_failures:
+        raise RuntimeError(f"Slack: xlsx NO subido — {xlsx_failures}")
 
 
 def _parse_destinations() -> list[str]:
@@ -92,7 +96,8 @@ def _resolve_destination(dest: str, headers: dict) -> str | None:
     return dest
 
 
-def _post_with_retry(channel: str, text: str, headers: dict, label: str) -> None:
+def _post_with_retry(channel: str, text: str, headers: dict, label: str) -> str:
+    """Returns the actual channel ID from the Slack API response (needed for file uploads to DMs)."""
     payload = {
         "channel": channel,
         "text": text,
@@ -105,8 +110,9 @@ def _post_with_retry(channel: str, text: str, headers: dict, label: str) -> None
             r = httpx.post(SLACK_API, json=payload, headers=headers, timeout=30)
             data = r.json()
             if data.get("ok"):
-                print(f"[slack] Enviado a {label}")
-                return
+                actual_channel = data.get("channel", channel)
+                print(f"[slack] Enviado a {label} (actual_channel={actual_channel})")
+                return actual_channel
             err = data.get("error", "unknown")
             print(f"[slack] {label} intento {attempt+1}/3 falló: {err}")
             if err in ("ratelimited", "service_unavailable") and attempt < 2:

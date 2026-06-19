@@ -8,7 +8,7 @@ export default function DownloadLogsPage() {
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    fetch(`${API}/client-stats`)
+    fetch(`${API}/last-run`)
       .then(r => r.json())
       .then(d => {
         if (d.error) throw new Error(d.error)
@@ -21,12 +21,19 @@ export default function DownloadLogsPage() {
       })
   }, [])
 
+  const okClients = data?.clients?.filter(c => c.status === 'ok') ?? []
+  const failedClients = data?.clients?.filter(c => c.status === 'failed') ?? []
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
         <a href="/" style={styles.back}>← Volver</a>
         <h1 style={styles.title}>Logs de descarga</h1>
-        {data?.date && <p style={styles.subtitle}>Datos del {data.date}</p>}
+        {data?.date && (
+          <p style={styles.subtitle}>
+            Corrida del {data.date} · {data.ok_count}/{data.total} clientes OK
+          </p>
+        )}
       </div>
 
       {loading && <p style={styles.muted}>Cargando...</p>}
@@ -37,32 +44,32 @@ export default function DownloadLogsPage() {
           <table style={styles.table}>
             <thead>
               <tr>
+                <th style={styles.th}>Estado</th>
                 <th style={styles.th}>Cliente</th>
-                <th style={{ ...styles.th, textAlign: 'right' }}>People</th>
-                <th style={{ ...styles.th, textAlign: 'right' }}>Email Activity</th>
+                <th style={{ ...styles.th, color: '#888' }}>Detalle / Error</th>
               </tr>
             </thead>
             <tbody>
               {data.clients.map((c, i) => (
                 <tr key={c.name} style={i % 2 === 0 ? styles.rowEven : styles.rowOdd}>
-                  <td style={styles.td}>{c.name}</td>
-                  <td style={{ ...styles.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                    {c.people.toLocaleString()}
+                  <td style={{ ...styles.td, width: 36, textAlign: 'center' }}>
+                    {c.status === 'ok'
+                      ? <span style={styles.ok}>✓</span>
+                      : <span style={styles.fail}>✗</span>}
                   </td>
-                  <td style={{ ...styles.td, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                    {c.email_activity.toLocaleString()}
+                  <td style={{ ...styles.td, fontWeight: c.status === 'ok' ? 500 : 400 }}>
+                    {c.name}
+                  </td>
+                  <td style={{ ...styles.td, color: c.status === 'ok' ? '#888' : '#b91c1c', fontSize: 12 }}>
+                    {c.status === 'ok' ? 'Descargado' : c.error}
                   </td>
                 </tr>
               ))}
             </tbody>
             <tfoot>
               <tr>
-                <td style={{ ...styles.td, fontWeight: 600 }}>Total</td>
-                <td style={{ ...styles.td, textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                  {data.clients.reduce((s, c) => s + c.people, 0).toLocaleString()}
-                </td>
-                <td style={{ ...styles.td, textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                  {data.clients.reduce((s, c) => s + c.email_activity, 0).toLocaleString()}
+                <td colSpan={3} style={{ ...styles.td, fontWeight: 600, fontSize: 13, color: '#555' }}>
+                  {okClients.length} exitosos · {failedClients.length} fallidos · {data.total} total
                 </td>
               </tr>
             </tfoot>
@@ -75,7 +82,7 @@ export default function DownloadLogsPage() {
 
 const styles = {
   container: {
-    maxWidth: 700,
+    maxWidth: 800,
     margin: '40px auto',
     padding: '0 20px',
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
@@ -134,6 +141,8 @@ const styles = {
   },
   rowEven: { background: '#fff' },
   rowOdd:  { background: '#fafafa' },
+  ok:   { color: '#16a34a', fontWeight: 700, fontSize: 16 },
+  fail: { color: '#dc2626', fontWeight: 700, fontSize: 16 },
   errorCard: {
     background: '#fef2f2',
     border: '1px solid #fecaca',

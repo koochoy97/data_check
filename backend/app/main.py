@@ -118,12 +118,14 @@ async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
         headless=headless,
     )
 
+    run_summary_clients = []
     for c in clients:
         cid = c["client_id"]
         display_name = c["client_name"]
         result = results.get(cid, {"error": "sin resultado"})
         if "error" in result:
             failures.append(f"{display_name}: {result['error']}")
+            run_summary_clients.append({"name": display_name, "status": "failed", "error": result["error"]})
         else:
             per_client_files.append({
                 "client_id": cid,
@@ -131,6 +133,19 @@ async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
                 "people_csv": result.get("personas"),
                 "email_csv": result.get("correos"),
             })
+            run_summary_clients.append({"name": display_name, "status": "ok", "error": None})
+
+    # Persist run summary so /api/last-run can show all clients with their status
+    summary_path = DOWNLOAD_DIR / "last_run_summary.json"
+    import json as _json
+    summary_path.write_text(_json.dumps({
+        "date": datetime.now(PERU_UTC_OFFSET).strftime("%Y-%m-%d"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "total": len(clients),
+        "ok_count": len(per_client_files),
+        "failed_count": len(failures),
+        "clients": run_summary_clients,
+    }))
 
     # Emit full per-client outcome summary so operators can see all clients at a glance
     ok_names = [f["client_name"] for f in per_client_files]
@@ -167,11 +182,11 @@ async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
         try:
             send_consolidated_slack(consolidated, pending_count=pending_count, xlsx_bytes=xlsx_bytes)
             xlsx_status = "con xlsx" if xlsx_bytes else "sin xlsx (falló generación)"
-            emit({"type": "progress", "message": f"Mensaje enviado a Slack ({xlsx_status})"})
+            emit({"type": "progress", "message": f"Slack enviado ({xlsx_status})"})
         except Exception as e:
             traceback.print_exc()
-            print(f"[slack] ERROR: {e}")
-            emit({"type": "progress", "message": f"Error enviando a Slack: {e}"})
+            emit({"type": "progress", "message": f"ERROR Slack: {e}"})
+            raise
 
     return per_client_files, failures, consolidated
 
@@ -818,6 +833,16 @@ async def sync_clients_gone():
         status_code=410,
         content={"error": "Removed: clients.json was eliminated. Use /reconciliation to add team_ids to Siete."},
     )
+
+
+@app.get("/api/last-run")
+def last_run():
+    """Estado del último pipeline: todos los clientes con su resultado (OK/FAILED)."""
+    import json as _json
+    summary_path = DOWNLOAD_DIR / "last_run_summary.json"
+    if not summary_path.exists():
+        return JSONResponse(status_code=404, content={"error": "No hay resumen de corrida anterior"})
+    return _json.loads(summary_path.read_text())
 
 
 @app.get("/api/client-stats")
