@@ -169,20 +169,23 @@ async def _run_bulk_pipeline(emit, clients: list[dict], pending_count: int = 0):
             emit({"type": "file", "name": path.name, "size": path.stat().st_size,
                   "path": f"/api/consolidated/{path.name}"})
 
-        emit({"type": "progress", "message": "Enviando a Slack..."})
-        xlsx_bytes: bytes | None = None
         try:
             from app.processing.tableau_exporter import generate_reuniones_xlsx
             meetings = await fetch_all_meetings()
             xlsx_bytes = generate_reuniones_xlsx(meetings)
-            emit({"type": "progress", "message": f"Xlsx de reuniones generado ({len(xlsx_bytes):,} bytes)"})
+            date_str = datetime.now(PERU_UTC_OFFSET).strftime("%Y-%m-%d")
+            xlsx_path = DOWNLOAD_DIR / "consolidated" / f"reuniones_{date_str}.xlsx"
+            xlsx_path.write_bytes(xlsx_bytes)
+            consolidated["reuniones"] = xlsx_path
+            emit({"type": "progress", "message": f"Xlsx de reuniones guardado ({len(xlsx_bytes):,} bytes)"})
         except Exception as e:
             traceback.print_exc()
             emit({"type": "progress", "message": f"[warn] No se pudo generar xlsx de reuniones: {e}"})
+
+        emit({"type": "progress", "message": "Enviando a Slack..."})
         try:
-            send_consolidated_slack(consolidated, pending_count=pending_count, xlsx_bytes=xlsx_bytes)
-            xlsx_status = "con xlsx" if xlsx_bytes else "sin xlsx (falló generación)"
-            emit({"type": "progress", "message": f"Slack enviado ({xlsx_status})"})
+            send_consolidated_slack(consolidated, pending_count=pending_count)
+            emit({"type": "progress", "message": "Slack enviado"})
         except Exception as e:
             traceback.print_exc()
             emit({"type": "progress", "message": f"ERROR Slack: {e}"})
@@ -398,15 +401,16 @@ def download_file(client_id: str, filename: str):
 
 @app.get("/api/consolidated/{filename}")
 def download_consolidated(filename: str):
-    if "/" in filename or ".." in filename or not filename.endswith(".csv"):
+    if "/" in filename or ".." in filename or not (filename.endswith(".csv") or filename.endswith(".xlsx")):
         raise HTTPException(status_code=400, detail="Invalid filename")
     path = DOWNLOAD_DIR / "consolidated" / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
+    media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if filename.endswith(".xlsx") else "text/csv"
     return FileResponse(
         path,
         filename=filename,
-        media_type="text/csv",
+        media_type=media_type,
         headers={"Cache-Control": "no-store"},
     )
 
